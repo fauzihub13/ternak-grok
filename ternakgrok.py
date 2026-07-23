@@ -25,7 +25,7 @@ SEND_URL = f"{BASE}/api/auth/send-verification-code"
 VERIFY_URL = f"{BASE}/api/auth/sign-up/verify-email"
 CREATE_URL = f"{BASE}/api/auth/sign-up/create-account"
 
-EMAIL_DOMAIN = "jiongguo.top"
+EMAIL_DOMAIN = "hungtpt.site"
 GENERATOR_BASE = "https://generator.email"
 DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD", "LauSapeEmpruy88@@")
 
@@ -711,7 +711,7 @@ def main() -> int:
     print("\n" + "=" * 46)
     print(f" ✔ Berhasil : {results['ok']}")
     if results["fail"]:
-        print(f"⏲ Gagal    : {results['fail']}")
+        print(f" ✗ Gagal    : {results['fail']}")
     print(f" ⏲ Waktu    : {menit} menit {detik} detik")
     print(f" ➤ Lihat akun di: accounts.txt")
     return 0 if results["fail"] == 0 else 1
