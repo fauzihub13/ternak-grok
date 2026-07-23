@@ -20,6 +20,40 @@ import requests as std_requests
 
 load_dotenv()
 
+# ── ANSI Colors ──────────────────────────────────────────────────────
+class C:
+    RESET   = "\033[0m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+
+def ok(msg: str) -> str:
+    return f"{C.GREEN}{msg}{C.RESET}"
+
+def fail(msg: str) -> str:
+    return f"{C.RED}{msg}{C.RESET}"
+
+def warn(msg: str) -> str:
+    return f"{C.YELLOW}{msg}{C.RESET}"
+
+def info(msg: str) -> str:
+    return f"{C.CYAN}{msg}{C.RESET}"
+
+def step(msg: str) -> str:
+    return f"{C.BLUE}{msg}{C.RESET}"
+
+def bold(msg: str) -> str:
+    return f"{C.BOLD}{msg}{C.RESET}"
+
+def dim(msg: str) -> str:
+    return f"{C.DIM}{msg}{C.RESET}"
+
+# ── Config ───────────────────────────────────────────────────────────
 BASE = "https://console.x.ai"
 SEND_URL = f"{BASE}/api/auth/send-verification-code"
 VERIFY_URL = f"{BASE}/api/auth/sign-up/verify-email"
@@ -201,13 +235,13 @@ class TempEmail:
             try:
                 code = self.extract_code(self.get_inbox_page())
             except Exception as e:
-                print(f"  ... inbox error ({attempt}/{max_retries}): {e}")
+                print(f"  {warn('...')} inbox error ({attempt}/{max_retries}): {fail(str(e))}")
                 code = None
             if code:
                 print()  # finish the waiting line cleanly
                 return code
             if attempt < max_retries:
-                print(f"  ... waiting OTP ({attempt}/{max_retries})   ", end="\r", flush=True)
+                print(f"  {warn('...')} waiting OTP ({attempt}/{max_retries})   ", end="\r", flush=True)
                 time.sleep(delay)
         print()
         return None
@@ -327,11 +361,11 @@ def solve_turnstile(
     proxy: str | None = None,
 ) -> str:
     """Try external solver first; fall back to camoufox if it fails/times out."""
-    # â”€â”€ camoufox direct (no external solver) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── camoufox direct (no external solver) ──────────────────────────
     if not solver_base:
         return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
 
-    # â”€â”€ external solver â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── external solver ──────────────────────────────────────────────
     create_url = (
         f"{solver_base.rstrip('/')}/turnstile"
         f"?url={quote(page_url, safe='')}"
@@ -401,20 +435,19 @@ def solve_turnstile(
 
 def print_resp(label: str, resp: cffi_requests.Response, verbose: bool = False) -> None:
     body = resp.text
-    ok = resp.status_code < 400
-    icon = "âœ“" if ok else "âœ—"
+    ok_status = resp.status_code < 400
     if "cloudflare" in body.lower() and len(body) > 400:
         tag = "BLOCKED" if "Sorry, you have been blocked" in body else "CF-HTML"
-        print(f"  {icon} [{label}] {resp.status_code} {tag}")
+        print(f"  {fail('[BLOCKED]')} [{label}] {resp.status_code} {warn(tag)}")
         return
-    if verbose or not ok:
+    if verbose or not ok_status:
         try:
             j = resp.json()
-            print(f"  {icon} [{label}] {resp.status_code} {json.dumps(j)}")
+            print(f"  {fail('[ERR]')} [{label}] {resp.status_code} {dim(json.dumps(j))}")
         except Exception:
-            print(f"  {icon} [{label}] {resp.status_code} {body[:300]}")
+            print(f"  {fail('[ERR]')} [{label}] {resp.status_code} {dim(body[:300])}")
     else:
-        print(f"  {icon} [{label}] {resp.status_code} ok")
+        print(f"  {ok('[OK]')} [{label}] {resp.status_code} {ok('ok')}")
 
 
 def connect_to_router(
@@ -423,8 +456,8 @@ def connect_to_router(
     router_token: str = ROUTER_AUTH_TOKEN,
     proxy: str | None = None,
 ) -> bool:
-    """Authorize new xAI account to 9router ” pure API, no browser needed."""
-    print("\n[+] Menghubungkan akun ke 9router...")
+    """Authorize new xAI account to 9router — pure API, no browser needed."""
+    print(f"\n{info('[+]')} Menghubungkan akun ke {bold('9router')}...")
     try:
         resp = std_requests.get(
             f"{router_base}/api/oauth/grok-cli/device-code",
@@ -433,11 +466,11 @@ def connect_to_router(
             timeout=15,
         )
         if resp.status_code != 200:
-            print(f" ✘ 9router tidak merespons (kode {resp.status_code})")
+            print(f"  {fail('[ERR]')} 9router tidak merespons (kode {resp.status_code})")
             return False
         data = resp.json()
     except Exception as e:
-        print(f"  ✘ 9router tidak dapat dijangkau: {e}")
+        print(f"  {fail('[ERR]')} 9router tidak dapat dijangkau: {e}")
         return False
 
     verify_url = data.get("verification_uri_complete") or data.get("verificationUriComplete")
@@ -460,7 +493,7 @@ def connect_to_router(
             allow_redirects=True,
         )
     except Exception as e:
-        print(f"  ✘ Gagal menghubungkan (langkah 1): {e}")
+        print(f"  {fail('[ERR]')} Gagal menghubungkan (langkah 1): {e}")
         return False
 
     # Step 2: approve (Allow button)
@@ -474,7 +507,7 @@ def connect_to_router(
             allow_redirects=True,
         )
     except Exception as e:
-        print(f"  ✘ Gagal menghubungkan (langkah 2): {e}")
+        print(f"  {fail('[ERR]')} Gagal menghubungkan (langkah 2): {e}")
         return False
 
     # Step 3: poll 9router
@@ -486,10 +519,10 @@ def connect_to_router(
         timeout=15,
     )
     if poll_resp.status_code == 200:
-        print("  ✔ Akun berhasil terhubung ke 9router!")
+        print(f"  {ok('[OK]')} Akun berhasil terhubung ke {bold('9router')}!")
         return True
     else:
-        print(f"  ✘ Koneksi 9router gagal: {poll_resp.text[:200]}")
+        print(f"  {fail('[ERR]')} Koneksi 9router gagal: {dim(poll_resp.text[:200])}")
         return False
 
 
@@ -511,13 +544,13 @@ def _safe_print(*a, **kw):
 
 def register_one(args, worker_id: int = 0) -> bool:
     """Buat satu akun. Return True jika berhasil."""
-    prefix = f"[#{worker_id}] " if worker_id else ""
+    prefix = f"{dim(f'[#{worker_id}]')}" if worker_id else ""
 
     email = random_email()
     given_name = random.choice(FIRST_NAMES)
     family_name = random.choice(LAST_NAMES)
 
-    _safe_print(f"\n{prefix} ➤ {email}  - {given_name} {family_name}")
+    _safe_print(f"\n{prefix} {step('➤')} {bold(email)}  - {given_name} {family_name}")
 
     # inbox
     mail = TempEmail(email, proxy=None)
@@ -538,34 +571,34 @@ def register_one(args, worker_id: int = 0) -> bool:
     try:
         send_resp = send_code(session, email)
     except Exception as e:
-        _safe_print(f"{prefix}  ✘ Gagal mengirim kode: {e}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal mengirim kode: {fail(str(e))}")
         return False
     if send_resp.status_code >= 400:
         try:
             err = send_resp.json().get("error") or send_resp.text[:80]
         except Exception:
             err = send_resp.text[:80]
-        _safe_print(f"{prefix}  ✘ Email ditolak: {err}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Email ditolak: {fail(str(err))}")
         return False
-    _safe_print(f"{prefix}  [1/4] Kode verifikasi terkirim!")
+    _safe_print(f"{prefix}  {step('[1/4]')} {ok('Kode verifikasi terkirim!')}")
 
     # 2) OTP
     code = mail.wait_for_code(max_retries=args.otp_retries, delay=args.otp_delay)
     if not code:
-        _safe_print(f"{prefix}  ✘ Kode OTP tidak diterima")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Kode OTP tidak diterima")
         return False
-    _safe_print(f"{prefix}  [2/4] Kode OTP diterima: {code}")
+    _safe_print(f"{prefix}  {step('[2/4]')} {ok('Kode OTP diterima:')} {bold(code)}")
 
     # 3) verify email
     try:
         verify_resp = verify_email(session, email, code)
     except Exception as e:
-        _safe_print(f"{prefix}  ✘ Gagal verifikasi: {e}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal verifikasi: {fail(str(e))}")
         return False
     if verify_resp.status_code >= 400:
-        _safe_print(f"{prefix}  ✘ Kode tidak valid")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Kode tidak valid")
         return False
-    _safe_print(f"{prefix}  [3/4] Email terverifikasi, melewati keamanan...")
+    _safe_print(f"{prefix}  {step('[3/4]')} {ok('Email terverifikasi,')} {warn('melewati keamanan...')}")
 
     # 4) turnstile
     try:
@@ -577,7 +610,7 @@ def register_one(args, worker_id: int = 0) -> bool:
             proxy=args.proxy,
         )
     except Exception as e:
-        _safe_print(f"{prefix}  ✘ Verifikasi keamanan gagal: {e}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Verifikasi keamanan gagal: {fail(str(e))}")
         return False
 
     # 5) create account
@@ -592,7 +625,7 @@ def register_one(args, worker_id: int = 0) -> bool:
             turnstile_token=token,
         )
     except Exception as e:
-        _safe_print(f"{prefix}  ✘ Gagal membuat akun: {e}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun: {fail(str(e))}")
         return False
 
     if create_resp.status_code >= 400:
@@ -600,25 +633,25 @@ def register_one(args, worker_id: int = 0) -> bool:
             err = create_resp.json().get("error") or create_resp.text[:80]
         except Exception:
             err = create_resp.text[:80]
-        _safe_print(f"{prefix}  ✗ Gagal membuat akun: {err}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun: {fail(str(err))}")
         return False
 
     try:
         uid = create_resp.json().get("session", {}).get("userId", "-")
     except Exception:
         uid = "-"
-    _safe_print(f"{prefix}  [4/4]  ✔ Akun berhasil dibuat!")
+    _safe_print(f"{prefix}  {step('[4/4]')} {ok('[OK]')} {ok('Akun berhasil dibuat!')}")
 
     # 6) 9router
     router_status = "-"
     if args.router:
-        ok = connect_to_router(
+        ok_router = connect_to_router(
             session=session,
             router_base=args.router_base,
             router_token=args.router_token,
             proxy=args.proxy,
         )
-        router_status = "connected" if ok else "failed"
+        router_status = "connected" if ok_router else "failed"
 
     # simpan ke accounts.txt
     ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -626,7 +659,7 @@ def register_one(args, worker_id: int = 0) -> bool:
     with _print_lock_fn():
         with open("accounts.txt", "a", encoding="utf-8") as f:
             f.write(line)
-    _safe_print(f"{prefix}  ✔ Tersimpan ➤ accounts.txt")
+    _safe_print(f"{prefix}  {ok('[OK]')} Tersimpan {step('➤')} {bold('accounts.txt')}")
     return True
 
 
@@ -659,36 +692,36 @@ def main() -> int:
     # Tanya interaktif jika tidak di-pass via argumen
     if args.count is None:
         try:
-            args.count = int(input("Berapa banyak akun yang ingin dibuat? "))
+            args.count = int(input(f"{info('?')} Berapa banyak akun yang ingin dibuat? "))
         except (ValueError, EOFError):
             args.count = 1
     if args.threads is None:
         try:
-            args.threads = int(input("Berapa thread (proses paralel)? [1 = satu-satu] "))
+            args.threads = int(input(f"{info('?')} Berapa thread (proses paralel)? [1 = satu-satu] "))
         except (ValueError, EOFError):
             args.threads = 1
     if args.proxy is None:
         try:
-            pakai = input("Mau pakai proxy? (y/n) ").strip().lower()
+            pakai = input(f"{info('?')} Mau pakai proxy? (y/n) ").strip().lower()
             if pakai == "y":
-                args.proxy = input("Masukkan proxy (http://user:pass@host:port): ").strip() or None
+                args.proxy = input(f"{info('?')} Masukkan proxy (http://user:pass@host:port): ").strip() or None
         except EOFError:
             pass
 
     args.count = max(1, args.count)
     args.threads = max(1, min(args.threads, args.count))
 
-    print(f"\n ➤ Membuat {args.count} akun dengan {args.threads} thread...")
-    print("=" * 46)
+    print(f"\n {step('➤')} Membuat {bold(str(args.count))} akun dengan {bold(str(args.threads))} thread...")
+    print(f"{dim('=' * 46)}")
 
     results = {"ok": 0, "fail": 0}
     lock = _threading.Lock()
     start_time = _dt.datetime.now()
 
     def worker(wid: int):
-        ok = register_one(args, worker_id=wid)
+        result = register_one(args, worker_id=wid)
         with lock:
-            if ok:
+            if result:
                 results["ok"] += 1
             else:
                 results["fail"] += 1
@@ -708,12 +741,12 @@ def main() -> int:
     total_sec = int(elapsed.total_seconds())
     menit, detik = divmod(total_sec, 60)
 
-    print("\n" + "=" * 46)
-    print(f" ✔ Berhasil : {results['ok']}")
+    print(f"\n{dim('=' * 46)}")
+    print(f" {ok('[OK]')} Berhasil : {ok(str(results['ok']))}")
     if results["fail"]:
-        print(f" ✗ Gagal    : {results['fail']}")
-    print(f" ⏲ Waktu    : {menit} menit {detik} detik")
-    print(f" ➤ Lihat akun di: accounts.txt")
+        print(f" {fail('[ERR]')} Gagal    : {fail(str(results['fail']))}")
+    print(f" {info('[i]')} Waktu    : {bold(f'{menit} menit {detik} detik')}")
+    print(f" {step('➤')} Lihat akun di: {bold('accounts.txt')}")
     return 0 if results["fail"] == 0 else 1
 
 
