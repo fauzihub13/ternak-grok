@@ -87,22 +87,28 @@ API_HEADERS = {
     "sec-fetch-site": "same-origin",
 }
 
+
 FIRST_NAMES = [
-    "James", "Oliver", "Liam", "Noah", "Ethan", "Mason", "Logan", "Lucas",
-    "Aiden", "Jackson", "Sebastian", "Mateo", "Jack", "Owen", "Theodore",
-    "Emma", "Olivia", "Ava", "Sophia", "Isabella", "Mia", "Charlotte",
-    "Amelia", "Harper", "Evelyn", "Abigail", "Emily", "Luna", "Sofia", "Ella",
     "Ahmad", "Rafi", "Dimas", "Budi", "Andi", "Sari", "Putri", "Dewi",
+    "Agus", "Eka", "Rizky", "Fajar", "Bayu", "Yudi", "Tono", "Wawan",
+    "Indah", "Rina", "Ayu", "Kartika", "Mega", "Nanda", "Citra", "Lestari",
+    "Hendra", "Joko", "Taufik", "Arif", "Yusuf", "Nurul", "Fitri", "Melati",
+    "Hani", "Dian", "Rizal", "Slamet", "Surya", "Galih", "Farhan", "Rizwan",
+    "Sinta", "Maya", "Novi", "Rosa", "Yani", "Tia", "Dianita", "Rizka",
+    "Rachma", "Anisa"
 ]
 
 LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Wilson", "Moore", "Taylor", "Anderson", "Thomas", "Jackson",
-    "White", "Harris", "Martin", "Thompson", "Robinson", "Clark", "Lewis",
-    "Young", "Walker", "Hall", "Allen", "King", "Wright", "Scott", "Green",
     "Udin", "Pratama", "Saputra", "Wijaya", "Nugraha", "Santoso",
+    "Hidayat", "Gunawan", "Susanto", "Mahendra", "Setiawan", "Firmansyah",
+    "Syahputra", "Ramadhan", "Permana", "Sutrisno", "Wibowo", "Suryadi",
+    "Kurniawan", "Subekti", "Suharto", "Basuki", "Purnomo", "Iskandar",
+    "Halim", "Nasution", "Lubis", "Simanjuntak", "Hutagalung", "Siregar",
+    "Manullang", "Sinaga", "Panjaitan", "Sitompul", "Tambunan", "Hutapea",
+    "Ginting", "Tarigan", "Sembiring", "Purba", "Saragih", "Pakpahan",
+    "Nainggolan", "Hutasoit", "Pasaribu", "Tobing", "Sihombing", "Malau",
+    "LumbanGaol", "Hutajulu"
 ]
-
 
 def random_email(domain: str = EMAIL_DOMAIN, length: int = 8) -> str:
     chars = string.ascii_lowercase + string.digits
