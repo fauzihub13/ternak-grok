@@ -484,9 +484,15 @@ def solve_turnstile_camoufox(
     """Gratis, no API key. No page.evaluate (CSP). init_script + console + CDP input + click widget."""
     from camoufox.sync_api import Camoufox
 
-    # virtual = better vs CF headless detect; TURNSTILE_HEADED=1 for debug window
+    # virtual display = Linux only; macOS/Windows pakai headless=True biasa
+    # TURNSTILE_HEADED=1 buka window browser (debug)
     headed = os.getenv("TURNSTILE_HEADED", "").strip().lower() in {"1", "true", "yes", "y"}
-    headless_mode: bool | str = False if headed else "virtual"
+    if headed:
+        headless_mode: bool | str = False
+    elif sys.platform.startswith("linux"):
+        headless_mode = "virtual"
+    else:
+        headless_mode = True
 
     launch_kw: dict = {"headless": headless_mode, "humanize": True}
     if proxy:

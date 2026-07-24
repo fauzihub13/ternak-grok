@@ -577,35 +577,44 @@ def connect_to_router(
         _safe_print(f"  {fail('[ERR]')} URL verifikasi tidak ditemukan")
         return False
 
-    # Step 2: Verify and approve using browser
+    # Step 2: Verify and approve using curl_cucci (like base.py)
+    auth_headers = {
+        "content-type": "application/x-www-form-urlencoded",
+        "origin": "https://accounts.x.ai",
+        "referer": f"https://accounts.x.ai/oauth2/device?user_code={user_code}",
+    }
+
+    # Create session with browser cookies
+    session = make_session("chrome136", None)
+    session.cookies.update(cookie_dict)
+
+    # Verify (Continue)
     try:
-        # Navigate to verify URL
-        page.goto(verify_url, wait_until="networkidle", timeout=15_000)
-        time.sleep(3)
-
-        # Dismiss cookie banner
-        try:
-            page.locator('#onetrust-accept-btn-handler').click(timeout=2_000)
-            time.sleep(0.5)
-        except Exception:
-            pass
-
-        # Click Continue
-        continue_btn = page.locator('button:has-text("Continue"), button:has-text("Allow")')
-        if continue_btn.count() > 0:
-            continue_btn.first.click()
-            time.sleep(3)
-
-        # Click Allow
-        allow_btn = page.locator('button:has-text("Allow"), button:has-text("Authorize")')
-        if allow_btn.count() > 0:
-            allow_btn.first.click()
-            time.sleep(3)
-
-        # Check final URL
-        _safe_print(f"  {dim('[debug]')} Final URL: {page.url}")
+        r1 = session.post(
+            "https://auth.x.ai/oauth2/device/verify",
+            data=f"user_code={user_code}",
+            headers=auth_headers,
+            timeout=20,
+            allow_redirects=True,
+        )
+        _safe_print(f"  {dim('[debug]')} Verify: {r1.status_code}")
     except Exception as e:
-        _safe_print(f"  {fail('[ERR]')} Gagal verifikasi browser: {e}")
+        _safe_print(f"  {fail('[ERR]')} Gagal verifikasi: {e}")
+        return False
+
+    # Approve (Allow)
+    auth_headers["referer"] = f"https://accounts.x.ai/oauth2/device/consent?user_code={user_code}"
+    try:
+        r2 = session.post(
+            "https://auth.x.ai/oauth2/device/approve",
+            data=f"user_code={user_code}&action=allow&principal_type=User&principal_id=",
+            headers=auth_headers,
+            timeout=20,
+            allow_redirects=True,
+        )
+        _safe_print(f"  {dim('[debug]')} Approve: {r2.status_code}")
+    except Exception as e:
+        _safe_print(f"  {fail('[ERR]')} Gagal approve: {e}")
         return False
 
     # Step 3: Poll 9router
@@ -699,7 +708,7 @@ def register_one(args, worker_id: int = 0) -> bool:
             try:
                 cookie_btn = page.locator('#onetrust-accept-btn-handler')
                 if cookie_btn.count() > 0:
-                    cookie_btn.click(timeout=3_000)
+                    cookie_btn.click(timeout=3_000, force=True)
                     time.sleep(1)
             except Exception:
                 pass
