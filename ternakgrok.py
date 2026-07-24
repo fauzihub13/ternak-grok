@@ -560,6 +560,7 @@ def connect_to_router(
             _safe_print(f"  {fail('[ERR]')} 9router tidak merespons (kode {resp.status_code})")
             return False
         data = resp.json()
+        _safe_print(f"  {dim('[debug]')} Device code: {str(data)[:200]}")
     except Exception as e:
         _safe_print(f"  {fail('[ERR]')} 9router tidak dapat dijangkau: {e}")
         return False
@@ -569,32 +570,54 @@ def connect_to_router(
     user_code = data.get("user_code") or data.get("userCode")
     verify_url = data.get("verification_uri_complete") or data.get("verificationUriComplete")
 
+    _safe_print(f"  {dim('[debug]')} verify_url: {verify_url}")
+    _safe_print(f"  {dim('[debug]')} user_code: {user_code}")
+
     if not verify_url:
         _safe_print(f"  {fail('[ERR]')} URL verifikasi tidak ditemukan")
         return False
 
     # Step 2: Navigate to verification URL in browser
     try:
+        _safe_print(f"  {dim('[debug]')} Navigating to verify URL...")
         page.goto(verify_url, wait_until="networkidle", timeout=15_000)
         time.sleep(2)
 
+        _safe_print(f"  {dim('[debug]')} Page URL: {page.url}")
+
+        # Dismiss cookie banner if exists
+        try:
+            page.locator('#onetrust-accept-btn-handler').click(timeout=2_000)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
         # Click "Continue" button
         continue_btn = page.locator('button:has-text("Continue"), button:has-text("Allow")')
+        _safe_print(f"  {dim('[debug]')} Continue buttons: {continue_btn.count()}")
         if continue_btn.count() > 0:
+            btn_text = continue_btn.first.inner_text()
+            _safe_print(f"  {dim('[debug]')} Clicking: {btn_text}")
             continue_btn.first.click()
             time.sleep(3)
 
         # Click "Allow" button if appears
         allow_btn = page.locator('button:has-text("Allow"), button:has-text("Authorize")')
+        _safe_print(f"  {dim('[debug]')} Allow buttons: {allow_btn.count()}")
         if allow_btn.count() > 0:
+            btn_text = allow_btn.first.inner_text()
+            _safe_print(f"  {dim('[debug]')} Clicking: {btn_text}")
             allow_btn.first.click()
             time.sleep(3)
+
+        _safe_print(f"  {dim('[debug]')} Final URL: {page.url}")
     except Exception as e:
         _safe_print(f"  {fail('[ERR]')} Gagal verifikasi browser: {e}")
         return False
 
     # Step 3: Poll 9router
     try:
+        _safe_print(f"  {dim('[debug]')} Polling 9router...")
         poll_resp = std_requests.post(
             f"{router_base}/api/oauth/grok-cli/poll",
             json={"deviceCode": device_code, "codeVerifier": code_verifier, "extraData": None},
@@ -602,9 +625,19 @@ def connect_to_router(
             headers={"Accept": "*/*", "Content-Type": "application/json"},
             timeout=15,
         )
+        _safe_print(f"  {dim('[debug]')} Poll response: {poll_resp.status_code} {poll_resp.text[:200]}")
         if poll_resp.status_code == 200:
-            _safe_print(f"  {ok('[OK]')} Akun terhubung ke {bold('9router')}!")
-            return True
+            try:
+                poll_data = poll_resp.json()
+                if poll_data.get("success"):
+                    _safe_print(f"  {ok('[OK]')} Akun terhubung ke {bold('9router')}!")
+                    return True
+                else:
+                    _safe_print(f"  {fail('[ERR]')} 9router tolak: {poll_data.get('error', 'unknown')} - {poll_data.get('errorDescription', '')}")
+                    return False
+            except Exception:
+                _safe_print(f"  {fail('[ERR]')} Response tidak valid: {poll_resp.text[:100]}")
+                return False
         else:
             _safe_print(f"  {fail('[ERR]')} Poll gagal: {dim(poll_resp.text[:200])}")
             return False
@@ -681,6 +714,7 @@ def register_one(args, worker_id: int = 0) -> bool:
                 pass
 
             # 2) Click "Sign up with email"
+            _safe_print(f"{prefix}  {dim('[debug]')} URL: {page.url}")
             page.click("text=Sign up with email", timeout=10_000)
             time.sleep(2)
 
@@ -689,6 +723,7 @@ def register_one(args, worker_id: int = 0) -> bool:
             time.sleep(0.5)
             page.click('button[type="submit"]', timeout=10_000)
             time.sleep(3)
+            _safe_print(f"{prefix}  {dim('[debug]')} URL after submit: {page.url}")
             _safe_print(f"{prefix}  {step('[2/5]')} {ok('Email terkirim,')} {warn('menunggu OTP...')}")
 
             # 4) Wait for OTP
@@ -700,6 +735,7 @@ def register_one(args, worker_id: int = 0) -> bool:
 
             # 5) Enter OTP
             otp_input = page.locator('input[name="code"]')
+            _safe_print(f"{prefix}  {dim('[debug]')} OTP input count: {otp_input.count()}")
             if otp_input.count() == 0:
                 _safe_print(f"{prefix}  {fail('[ERR]')} Input OTP tidak ditemukan")
                 return False
@@ -707,9 +743,11 @@ def register_one(args, worker_id: int = 0) -> bool:
             time.sleep(0.5)
             page.click('button[type="submit"]', timeout=5_000)
             time.sleep(5)
+            _safe_print(f"{prefix}  {dim('[debug]')} URL after OTP: {page.url}")
 
             # 6) Fill password
             pwd_input = page.locator('input[type="password"]')
+            _safe_print(f"{prefix}  {dim('[debug]')} Password input count: {pwd_input.count()}")
             if pwd_input.count() > 0:
                 pwd_input.first.fill(args.password)
                 time.sleep(0.5)
@@ -718,16 +756,19 @@ def register_one(args, worker_id: int = 0) -> bool:
                     pwd_input.nth(1).fill(args.password)
                 page.click('button[type="submit"]', timeout=5_000)
                 time.sleep(5)
+                _safe_print(f"{prefix}  {dim('[debug]')} URL after password: {page.url}")
 
             # 7) Fill name
             fname_input = page.locator('input[name="firstName"], input[autocomplete="given-name"]')
             lname_input = page.locator('input[name="lastName"], input[autocomplete="family-name"]')
+            _safe_print(f"{prefix}  {dim('[debug]')} Name input count: {fname_input.count()}")
             if fname_input.count() > 0:
                 fname_input.fill(given_name)
                 lname_input.fill(family_name)
                 time.sleep(0.5)
                 page.click('button[type="submit"]', timeout=5_000)
                 time.sleep(5)
+                _safe_print(f"{prefix}  {dim('[debug]')} URL after name: {page.url}")
 
             # 8) Check success
             _safe_print(f"{prefix}  {step('[4/5]')} {ok('Proses selesai,')} {warn('cek status...')}")
@@ -735,6 +776,7 @@ def register_one(args, worker_id: int = 0) -> bool:
             # Get cookies
             cookies = page.context.cookies()
             session_cookies = {c["name"]: c["value"] for c in cookies}
+            _safe_print(f"{prefix}  {dim('[debug]')} Cookies: {list(session_cookies.keys())}")
 
             # Check for sso cookie (indicates success)
             uid = "-"
@@ -749,9 +791,10 @@ def register_one(args, worker_id: int = 0) -> bool:
                             payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
                             decoded = base64.b64decode(payload).decode()
                             data = json.loads(decoded)
-                            uid = data.get("sub", data.get("user_id", "-"))
-                except Exception:
-                    pass
+                            uid = data.get("sub", data.get("user_id", data.get("session_id", "-")))
+                            _safe_print(f"{prefix}  {dim('[debug]')} SSO data: {data}")
+                except Exception as e:
+                    _safe_print(f"{prefix}  {dim('[debug]')} SSO decode error: {e}")
 
                 # Fallback: get uid from console page
                 if uid == "-":
@@ -765,7 +808,7 @@ def register_one(args, worker_id: int = 0) -> bool:
                     except Exception:
                         pass
             else:
-                _safe_print(f"{prefix}  {fail('[ERR]')} Akun gagal dibuat")
+                _safe_print(f"{prefix}  {fail('[ERR]')} Akun gagal dibuat (cookies: {list(session_cookies.keys())})")
                 return False
 
             # 9) Connect to 9router
