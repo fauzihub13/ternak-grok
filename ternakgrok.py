@@ -337,19 +337,33 @@ def solve_turnstile_camoufox(
 
         # Intercept turnstile token dari network response
         captured_token = {"value": None}
+        captured_responses = []
 
         def handle_response(response):
             url = response.url
-            if "challenges.cloudflare.com" in url and "/turnstile/v0" in url:
+            # Capture semua response dari cloudflare
+            if "challenges.cloudflare.com" in url:
                 try:
                     body = response.text()
-                    if body and len(body) > 40 and not body.startswith("<"):
+                    status = response.status
+                    captured_responses.append({"url": url, "status": status, "body_len": len(body) if body else 0})
+                    # Token biasanya di response POST ke /turnstile/v0 atau /siteverify
+                    if "/turnstile/v0" in url or "/siteverify" in url:
+                        if body and len(body) > 20:
+                            captured_token["value"] = body
+                    # Atau bisa juga di response yang mengandung token langsung
+                    elif body and "eyJ" in body and len(body) > 100:
                         captured_token["value"] = body
                 except Exception:
                     pass
 
         page.on("response", handle_response)
         page.goto(page_url, wait_until="networkidle", timeout=30_000)
+
+        # Log responses captured
+        print(f"  [debug] Captured {len(captured_responses)} CF responses")
+        for r in captured_responses:
+            print(f"  [debug]   {r['status']} {r['url'][:80]} (len={r['body_len']})")
 
         # Tunggu turnstile iframe muncul lalu klik
         try:
@@ -358,8 +372,9 @@ def solve_turnstile_camoufox(
             turnstile_frame.locator("input[type='checkbox']").wait_for(timeout=15_000)
             # Klik checkbox
             turnstile_frame.locator("input[type='checkbox']").click()
-        except Exception:
-            pass
+            print("  [debug] Clicked turnstile checkbox")
+        except Exception as e:
+            print(f"  [debug] Turnstile click failed: {e}")
 
         # Tunggu token dari network atau fallback
         deadline = time.time() + (timeout_ms / 1000)
@@ -367,6 +382,10 @@ def solve_turnstile_camoufox(
             time.sleep(0.5)
 
         token = captured_token["value"]
+        if token:
+            print(f"  [debug] Token captured: {token[:30]}...")
+        else:
+            print("  [debug] No token captured from network")
 
     if not token or len(token) < 40:
         raise RuntimeError(f"camoufox turnstile bad token: {token!r}")
@@ -630,6 +649,7 @@ def register_one(args, worker_id: int = 0) -> bool:
             max_wait=args.turnstile_wait,
             proxy=args.proxy,
         )
+        _safe_print(f"{prefix}  {step('[4/5]')} {ok('Turnstile solved:')} {dim(token[:30])}...")
     except Exception as e:
         _safe_print(f"{prefix}  {fail('[ERR]')} Verifikasi keamanan gagal: {fail(str(e))}")
         return False
@@ -646,15 +666,16 @@ def register_one(args, worker_id: int = 0) -> bool:
             turnstile_token=token,
         )
     except Exception as e:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun: {fail(str(e))}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun (exception): {fail(str(e))}")
         return False
 
     if create_resp.status_code >= 400:
         try:
-            err = create_resp.json().get("error") or create_resp.text[:80]
+            err_json = create_resp.json()
+            err = err_json.get("error") or create_resp.text[:200]
         except Exception:
-            err = create_resp.text[:80]
-        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun: {fail(str(err))}")
+            err = create_resp.text[:200]
+        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun ({create_resp.status_code}): {fail(str(err))}")
         return False
 
     try:
