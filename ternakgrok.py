@@ -335,57 +335,76 @@ def solve_turnstile_camoufox(
     with Camoufox(**launch_kw) as browser:
         page = browser.new_page()
 
-        # Intercept turnstile token dari network response
-        captured_token = {"value": None}
-        captured_responses = []
+        # Inject script capture turnstile token SEBELUM page load
+        page.add_init_script("""
+            window.__turnstile_token = null;
+            const origRender = window.turnstile?.render;
+            // Override callback untuk capture token
+            window.__captureTurnstile = function(token) {
+                window.__turnstile_token = token;
+            };
+        """)
 
-        def handle_response(response):
-            url = response.url
-            # Capture semua response dari cloudflare
-            if "challenges.cloudflare.com" in url:
+        page.goto(page_url, wait_until="networkidle", timeout=30_000)
+
+        # Tunggu turnstile widget muncul dan solve
+        # Camoufox biasanya auto-solve, tunggu saja
+        deadline = time.time() + (timeout_ms / 1000)
+        check_count = 0
+        while time.time() < deadline:
+            check_count += 1
+            try:
+                # Cek apakah turnstile sudah solved dengan cek token di page
+                result = page.evaluate("""
+                    () => {
+                        // Cek di response/input hidden
+                        const input = document.querySelector('input[name="cf-turnstile-response"]');
+                        if (input && input.value) return input.value;
+                        // Cek di turnstile widget
+                        const widget = document.querySelector('.cf-turnstile');
+                        if (widget) {
+                            const resp = widget.querySelector('[name="cf-turnstile-response"]');
+                            if (resp && resp.value) return resp.value;
+                        }
+                        // Cek global token
+                        if (window.__turnstile_token) return window.__turnstile_token;
+                        return null;
+                    }
+                """)
+                if result and len(result) > 40:
+                    token = result
+                    break
+            except Exception:
+                pass
+
+            # Coba klik turnstile checkbox jika ada
+            if check_count == 3:
                 try:
-                    body = response.text()
-                    status = response.status
-                    captured_responses.append({"url": url, "status": status, "body_len": len(body) if body else 0})
-                    # Token biasanya di response POST ke /turnstile/v0 atau /siteverify
-                    if "/turnstile/v0" in url or "/siteverify" in url:
-                        if body and len(body) > 20:
-                            captured_token["value"] = body
-                    # Atau bisa juga di response yang mengandung token langsung
-                    elif body and "eyJ" in body and len(body) > 100:
-                        captured_token["value"] = body
+                    # Cari iframe turnstile
+                    frames = page.frames
+                    for frame in frames:
+                        if "challenges.cloudflare.com" in frame.url:
+                            # Klik body frame untuk trigger
+                            frame.click("body", timeout=3000)
+                            break
                 except Exception:
                     pass
 
-        page.on("response", handle_response)
-        page.goto(page_url, wait_until="networkidle", timeout=30_000)
+            time.sleep(1)
 
-        # Log responses captured
-        print(f"  [debug] Captured {len(captured_responses)} CF responses")
-        for r in captured_responses:
-            print(f"  [debug]   {r['status']} {r['url'][:80]} (len={r['body_len']})")
-
-        # Tunggu turnstile iframe muncul lalu klik
-        try:
-            turnstile_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
-            # Tunggu checkbox turnstile muncul
-            turnstile_frame.locator("input[type='checkbox']").wait_for(timeout=15_000)
-            # Klik checkbox
-            turnstile_frame.locator("input[type='checkbox']").click()
-            print("  [debug] Clicked turnstile checkbox")
-        except Exception as e:
-            print(f"  [debug] Turnstile click failed: {e}")
-
-        # Tunggu token dari network atau fallback
-        deadline = time.time() + (timeout_ms / 1000)
-        while time.time() < deadline and not captured_token["value"]:
-            time.sleep(0.5)
-
-        token = captured_token["value"]
-        if token:
-            print(f"  [debug] Token captured: {token[:30]}...")
-        else:
-            print("  [debug] No token captured from network")
+        # Fallback: cek lagi setelah tunggu
+        if not token:
+            try:
+                result = page.evaluate("""
+                    () => {
+                        const input = document.querySelector('input[name="cf-turnstile-response"]');
+                        return input ? input.value : null;
+                    }
+                """)
+                if result and len(result) > 40:
+                    token = result
+            except Exception:
+                pass
 
     if not token or len(token) < 40:
         raise RuntimeError(f"camoufox turnstile bad token: {token!r}")
