@@ -5,6 +5,7 @@ DARI AI UNTUK AI
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import random
@@ -540,13 +541,14 @@ def print_resp(label: str, resp: cffi_requests.Response, verbose: bool = False) 
 
 
 def connect_to_router(
-    session,
+    page,
     router_base: str = ROUTER_BASE,
     router_token: str = ROUTER_AUTH_TOKEN,
-    proxy: str | None = None,
 ) -> bool:
-    """Authorize new xAI account to 9router — pure API, no browser needed."""
-    print(f"\n{info('[+]')} Menghubungkan akun ke {bold('9router')}...")
+    """Authorize new xAI account to 9router via browser."""
+    _safe_print(f"  {info('[+]')} Menghubungkan ke {bold('9router')}...")
+
+    # Step 1: Get device code from 9router
     try:
         resp = std_requests.get(
             f"{router_base}/api/oauth/grok-cli/device-code",
@@ -555,63 +557,59 @@ def connect_to_router(
             timeout=15,
         )
         if resp.status_code != 200:
-            print(f"  {fail('[ERR]')} 9router tidak merespons (kode {resp.status_code})")
+            _safe_print(f"  {fail('[ERR]')} 9router tidak merespons (kode {resp.status_code})")
             return False
         data = resp.json()
     except Exception as e:
-        print(f"  {fail('[ERR]')} 9router tidak dapat dijangkau: {e}")
+        _safe_print(f"  {fail('[ERR]')} 9router tidak dapat dijangkau: {e}")
         return False
 
-    verify_url = data.get("verification_uri_complete") or data.get("verificationUriComplete")
     device_code = data.get("device_code") or data.get("deviceCode")
     code_verifier = data.get("codeVerifier") or data.get("code_verifier")
     user_code = data.get("user_code") or data.get("userCode")
-    auth_headers = {
-        "content-type": "application/x-www-form-urlencoded",
-        "origin": "https://accounts.x.ai",
-        "referer": f"https://accounts.x.ai/oauth2/device?user_code={user_code}",
-    }
+    verify_url = data.get("verification_uri_complete") or data.get("verificationUriComplete")
 
-    # Step 1: verify (Continue button)
-    try:
-        r1 = session.post(
-            "https://auth.x.ai/oauth2/device/verify",
-            data=f"user_code={user_code}",
-            headers=auth_headers,
-            timeout=20,
-            allow_redirects=True,
-        )
-    except Exception as e:
-        print(f"  {fail('[ERR]')} Gagal menghubungkan (langkah 1): {e}")
+    if not verify_url:
+        _safe_print(f"  {fail('[ERR]')} URL verifikasi tidak ditemukan")
         return False
 
-    # Step 2: approve (Allow button)
-    auth_headers["referer"] = f"https://accounts.x.ai/oauth2/device/consent?user_code={user_code}"
+    # Step 2: Navigate to verification URL in browser
     try:
-        r2 = session.post(
-            "https://auth.x.ai/oauth2/device/approve",
-            data=f"user_code={user_code}&action=allow&principal_type=User&principal_id=",
-            headers=auth_headers,
-            timeout=20,
-            allow_redirects=True,
-        )
+        page.goto(verify_url, wait_until="networkidle", timeout=15_000)
+        time.sleep(2)
+
+        # Click "Continue" button
+        continue_btn = page.locator('button:has-text("Continue"), button:has-text("Allow")')
+        if continue_btn.count() > 0:
+            continue_btn.first.click()
+            time.sleep(3)
+
+        # Click "Allow" button if appears
+        allow_btn = page.locator('button:has-text("Allow"), button:has-text("Authorize")')
+        if allow_btn.count() > 0:
+            allow_btn.first.click()
+            time.sleep(3)
     except Exception as e:
-        print(f"  {fail('[ERR]')} Gagal menghubungkan (langkah 2): {e}")
+        _safe_print(f"  {fail('[ERR]')} Gagal verifikasi browser: {e}")
         return False
 
-    # Step 3: poll 9router
-    poll_resp = std_requests.post(
-        f"{router_base}/api/oauth/grok-cli/poll",
-        json={"deviceCode": device_code, "codeVerifier": code_verifier, "extraData": None},
-        cookies={"auth_token": router_token},
-        headers={"Accept": "*/*", "Content-Type": "application/json"},
-        timeout=15,
-    )
-    if poll_resp.status_code == 200:
-        print(f"  {ok('[OK]')} Akun berhasil terhubung ke {bold('9router')}!")
-        return True
-    else:
-        print(f"  {fail('[ERR]')} Koneksi 9router gagal: {dim(poll_resp.text[:200])}")
+    # Step 3: Poll 9router
+    try:
+        poll_resp = std_requests.post(
+            f"{router_base}/api/oauth/grok-cli/poll",
+            json={"deviceCode": device_code, "codeVerifier": code_verifier, "extraData": None},
+            cookies={"auth_token": router_token},
+            headers={"Accept": "*/*", "Content-Type": "application/json"},
+            timeout=15,
+        )
+        if poll_resp.status_code == 200:
+            _safe_print(f"  {ok('[OK]')} Akun terhubung ke {bold('9router')}!")
+            return True
+        else:
+            _safe_print(f"  {fail('[ERR]')} Poll gagal: {dim(poll_resp.text[:200])}")
+            return False
+    except Exception as e:
+        _safe_print(f"  {fail('[ERR]')} Poll error: {e}")
         return False
 
 
@@ -673,6 +671,15 @@ def register_one(args, worker_id: int = 0) -> bool:
             page.goto("https://accounts.x.ai/sign-up", wait_until="networkidle", timeout=30_000)
             time.sleep(2)
 
+            # Dismiss cookie banner jika ada
+            try:
+                cookie_btn = page.locator('#onetrust-accept-btn-handler')
+                if cookie_btn.count() > 0:
+                    cookie_btn.click(timeout=3_000)
+                    time.sleep(1)
+            except Exception:
+                pass
+
             # 2) Click "Sign up with email"
             page.click("text=Sign up with email", timeout=10_000)
             time.sleep(2)
@@ -731,19 +738,32 @@ def register_one(args, worker_id: int = 0) -> bool:
 
             # Check for sso cookie (indicates success)
             uid = "-"
-            if "sso" in session_cookies:
+            if "sso" in session_cookies or "sso-rw" in session_cookies:
                 _safe_print(f"{prefix}  {ok('[OK]')} {ok('Akun berhasil dibuat!')}")
-                # Extract user ID from sso cookie if possible
+                # Extract user ID from sso cookie
                 try:
-                    import base64
-                    sso_parts = session_cookies["sso"].split(".")
-                    if len(sso_parts) >= 2:
-                        payload = sso_parts[1] + "=" * (4 - len(sso_parts[1]) % 4)
-                        decoded = base64.b64decode(payload).decode()
-                        uid_data = json.loads(decoded)
-                        uid = uid_data.get("sub", uid_data.get("user_id", "-"))
+                    sso_val = session_cookies.get("sso") or session_cookies.get("sso-rw")
+                    if sso_val:
+                        parts = sso_val.split(".")
+                        if len(parts) >= 2:
+                            payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+                            decoded = base64.b64decode(payload).decode()
+                            data = json.loads(decoded)
+                            uid = data.get("sub", data.get("user_id", "-"))
                 except Exception:
                     pass
+
+                # Fallback: get uid from console page
+                if uid == "-":
+                    try:
+                        page.goto("https://console.x.ai", wait_until="networkidle", timeout=15_000)
+                        time.sleep(2)
+                        html = page.content()
+                        uid_match = re.search(r'"userId"[:\s]+"([^"]+)"', html)
+                        if uid_match:
+                            uid = uid_match.group(1)
+                    except Exception:
+                        pass
             else:
                 _safe_print(f"{prefix}  {fail('[ERR]')} Akun gagal dibuat")
                 return False
@@ -751,14 +771,10 @@ def register_one(args, worker_id: int = 0) -> bool:
             # 9) Connect to 9router
             router_status = "-"
             if args.router:
-                # Create session with cookies for 9router
-                router_session = std_requests.Session()
-                router_session.cookies.update(session_cookies)
                 ok_router = connect_to_router(
-                    session=router_session,
+                    page=page,
                     router_base=args.router_base,
                     router_token=args.router_token,
-                    proxy=args.proxy,
                 )
                 router_status = "connected" if ok_router else "failed"
 
