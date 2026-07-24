@@ -294,24 +294,39 @@ def solve_turnstile_camoufox(
     token = None
     with Camoufox(**launch_kw) as browser:
         page = browser.new_page()
-        page.goto(page_url, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_function(
-            "typeof window.turnstile !== 'undefined'",
-            timeout=20_000,
-        )
-        js = f"""() => new Promise((resolve, reject) => {{
-            const div = document.createElement('div');
-            div.style.display = 'none';
-            document.body.appendChild(div);
-            window.turnstile.render(div, {{
-                sitekey: '{sitekey}',
-                callback: (t) => resolve(t),
-                'error-callback': () => reject(new Error('turnstile error-callback')),
-                'expired-callback': () => reject(new Error('turnstile expired')),
-            }});
-            setTimeout(() => reject(new Error('turnstile timeout')), {timeout_ms});
-        }})"""
-        token = page.evaluate(js)
+
+        # Intercept turnstile token dari network response
+        captured_token = {"value": None}
+
+        def handle_response(response):
+            url = response.url
+            if "challenges.cloudflare.com" in url and "/turnstile/v0" in url:
+                try:
+                    body = response.text()
+                    if body and len(body) > 40 and not body.startswith("<"):
+                        captured_token["value"] = body
+                except Exception:
+                    pass
+
+        page.on("response", handle_response)
+        page.goto(page_url, wait_until="networkidle", timeout=30_000)
+
+        # Tunggu turnstile iframe muncul lalu klik
+        try:
+            turnstile_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
+            # Tunggu checkbox turnstile muncul
+            turnstile_frame.locator("input[type='checkbox']").wait_for(timeout=15_000)
+            # Klik checkbox
+            turnstile_frame.locator("input[type='checkbox']").click()
+        except Exception:
+            pass
+
+        # Tunggu token dari network atau fallback
+        deadline = time.time() + (timeout_ms / 1000)
+        while time.time() < deadline and not captured_token["value"]:
+            time.sleep(0.5)
+
+        token = captured_token["value"]
 
     if not token or len(token) < 40:
         raise RuntimeError(f"camoufox turnstile bad token: {token!r}")
