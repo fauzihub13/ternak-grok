@@ -334,33 +334,107 @@ def solve_turnstile_camoufox(
     token = None
     with Camoufox(**launch_kw) as browser:
         page = browser.new_page()
+
+        # Inject hook SEBELUM page load - tangkap token dari turnstile callback
+        # add_script_tag inject ke DOM, bukan eval, jadi lolos CSP
+        hook_js = """
+        (function() {
+            window.__turnstile_token = null;
+            // Hook turnstile.render untuk capture callback
+            const checkTurnstile = setInterval(function() {
+                if (window.turnstile && window.turnstile.render) {
+                    clearInterval(checkTurnstile);
+                    const origRender = window.turnstile.render;
+                    window.turnstile.render = function(container, opts) {
+                        const origCallback = opts.callback;
+                        opts.callback = function(token) {
+                            window.__turnstile_token = token;
+                            if (origCallback) origCallback(token);
+                        };
+                        return origRender.call(this, container, opts);
+                    };
+                    // Juga auto-render turnstile widget
+                    try {
+                        const div = document.createElement('div');
+                        div.className = 'cf-turnstile';
+                        div.style.display = 'none';
+                        document.body.appendChild(div);
+                        window.turnstile.render(div, {
+                            sitekey: '%s',
+                            callback: function(t) { window.__turnstile_token = t; }
+                        });
+                    } catch(e) {}
+                }
+            }, 100);
+        })();
+        """ % sitekey
+
+        page.add_init_script(hook_js)
         page.goto(page_url, wait_until="networkidle", timeout=30_000)
 
-        # Tunggu turnstile solve dan ambil token dari HTML
+        # Tunggu token dari hook
         deadline = time.time() + (timeout_ms / 1000)
         while time.time() < deadline:
             try:
-                # Ambil full HTML content (tidak pakai eval)
+                # page.content() tidak pakai eval, lolos CSP
                 html = page.content()
-                # Cari token di hidden input
-                match = re.search(
-                    r'name=["\']cf-turnstile-response["\'][^>]*value=["\']([^"\']+)["\']',
-                    html
-                )
-                if match and len(match.group(1)) > 40:
-                    token = match.group(1)
-                    break
-                # Cek juga di data attribute
-                match2 = re.search(
-                    r'cf-turnstile-response["\'][^>]*data-response=["\']([^"\']+)["\']',
-                    html
-                )
-                if match2 and len(match2.group(1)) > 40:
-                    token = match2.group(1)
-                    break
+                # Cek apakah token ada di context via console message
+                # Atau cek di response header/cookie
             except Exception:
                 pass
+
+            # Coba ambil token via console log
+            try:
+                # Inject script kecil yang print token ke console
+                check_script = """
+                (function() {
+                    if (window.__turnstile_token) {
+                        console.log('TURNSTILE_TOKEN:' + window.__turnstile_token);
+                    }
+                })();
+                """
+                page.add_script_tag(content=check_script)
+            except Exception:
+                pass
+
             time.sleep(1)
+
+        # Intercept console messages untuk ambil token
+        captured_console = []
+        page.on("console", lambda msg: captured_console.append(msg.text) if "TURNSTILE_TOKEN:" in msg.text else None)
+
+        # Re-inject check setelah hook
+        try:
+            check_script = """
+            (function() {
+                if (window.__turnstile_token) {
+                    console.log('TURNSTILE_TOKEN:' + window.__turnstile_token);
+                }
+            })();
+            """
+            page.add_script_tag(content=check_script)
+        except Exception:
+            pass
+
+        time.sleep(2)
+
+        # Parse token dari console
+        for msg in captured_console:
+            if "TURNSTILE_TOKEN:" in msg:
+                token = msg.split("TURNSTILE_TOKEN:")[1].strip()
+                break
+
+        # Fallback: cek network response untuk turnstile verify
+        if not token:
+            try:
+                html = page.content()
+                # Cari token di script tags
+                import re as _re
+                match = _re.search(r'turnstile.*?token["\s:=]+["\']([a-zA-Z0-9._-]{100,})["\']', html)
+                if match:
+                    token = match.group(1)
+            except Exception:
+                pass
 
     if not token or len(token) < 40:
         raise RuntimeError(f"camoufox turnstile bad token: {token!r}")
@@ -466,7 +540,7 @@ def print_resp(label: str, resp: cffi_requests.Response, verbose: bool = False) 
 
 
 def connect_to_router(
-    session: cffi_requests.Session,
+    session,
     router_base: str = ROUTER_BASE,
     router_token: str = ROUTER_AUTH_TOKEN,
     proxy: str | None = None,
@@ -558,117 +632,139 @@ def _safe_print(*a, **kw):
 
 
 def register_one(args, worker_id: int = 0) -> bool:
-    """Buat satu akun. Return True jika berhasil."""
+    """Buat satu akun via browser. Return True jika berhasil."""
     prefix = f"{dim(f'[#{worker_id}]')}" if worker_id else ""
 
     email = random_email()
+    username, domain = email.split("@")
     given_name = random.choice(FIRST_NAMES)
     family_name = random.choice(LAST_NAMES)
 
     _safe_print(f"\n{prefix} {step('➤')} {bold(email)}  - {given_name} {family_name}")
 
-    # inbox
+    # inbox warmup
     mail = TempEmail(email, proxy=None)
     try:
         mail.warm()
     except Exception:
         pass
 
-    # session
-    session = make_session(args.impersonate, args.proxy)
-    if not args.no_warmup:
-        try:
-            warmup(session)
-        except Exception:
-            pass
+    # ── Browser flow ─────────────────────────────────────────────────
+    from camoufox.sync_api import Camoufox
 
-    # 1) send code
+    launch_kw: dict = {"headless": True}
+    if args.proxy:
+        from urllib.parse import urlparse
+        p = urlparse(args.proxy)
+        pcfg: dict = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+        if p.username:
+            pcfg["username"] = p.username
+        if p.password:
+            pcfg["password"] = p.password
+        launch_kw["proxy"] = pcfg
+        launch_kw["geoip"] = True
+
     try:
-        send_resp = send_code(session, email)
+        with Camoufox(**launch_kw) as browser:
+            page = browser.new_page()
+
+            # 1) Navigate to sign-up
+            _safe_print(f"{prefix}  {step('[1/5]')} {warn('Membuka halaman sign-up...')}")
+            page.goto("https://accounts.x.ai/sign-up", wait_until="networkidle", timeout=30_000)
+            time.sleep(2)
+
+            # 2) Click "Sign up with email"
+            page.click("text=Sign up with email", timeout=10_000)
+            time.sleep(2)
+
+            # 3) Fill email & submit
+            page.fill('input[type="email"]', email)
+            time.sleep(0.5)
+            page.click('button[type="submit"]', timeout=10_000)
+            time.sleep(3)
+            _safe_print(f"{prefix}  {step('[2/5]')} {ok('Email terkirim,')} {warn('menunggu OTP...')}")
+
+            # 4) Wait for OTP
+            code = mail.wait_for_code(max_retries=args.otp_retries, delay=args.otp_delay)
+            if not code:
+                _safe_print(f"{prefix}  {fail('[ERR]')} Kode OTP tidak diterima")
+                return False
+            _safe_print(f"{prefix}  {step('[3/5]')} {ok('OTP diterima:')} {bold(code)}")
+
+            # 5) Enter OTP
+            otp_input = page.locator('input[name="code"]')
+            if otp_input.count() == 0:
+                _safe_print(f"{prefix}  {fail('[ERR]')} Input OTP tidak ditemukan")
+                return False
+            otp_input.fill(code)
+            time.sleep(0.5)
+            page.click('button[type="submit"]', timeout=5_000)
+            time.sleep(5)
+
+            # 6) Fill password
+            pwd_input = page.locator('input[type="password"]')
+            if pwd_input.count() > 0:
+                pwd_input.first.fill(args.password)
+                time.sleep(0.5)
+                # Confirm password jika ada 2 input
+                if pwd_input.count() > 1:
+                    pwd_input.nth(1).fill(args.password)
+                page.click('button[type="submit"]', timeout=5_000)
+                time.sleep(5)
+
+            # 7) Fill name
+            fname_input = page.locator('input[name="firstName"], input[autocomplete="given-name"]')
+            lname_input = page.locator('input[name="lastName"], input[autocomplete="family-name"]')
+            if fname_input.count() > 0:
+                fname_input.fill(given_name)
+                lname_input.fill(family_name)
+                time.sleep(0.5)
+                page.click('button[type="submit"]', timeout=5_000)
+                time.sleep(5)
+
+            # 8) Check success
+            _safe_print(f"{prefix}  {step('[4/5]')} {ok('Proses selesai,')} {warn('cek status...')}")
+
+            # Get cookies
+            cookies = page.context.cookies()
+            session_cookies = {c["name"]: c["value"] for c in cookies}
+
+            # Check for sso cookie (indicates success)
+            uid = "-"
+            if "sso" in session_cookies:
+                _safe_print(f"{prefix}  {ok('[OK]')} {ok('Akun berhasil dibuat!')}")
+                # Extract user ID from sso cookie if possible
+                try:
+                    import base64
+                    sso_parts = session_cookies["sso"].split(".")
+                    if len(sso_parts) >= 2:
+                        payload = sso_parts[1] + "=" * (4 - len(sso_parts[1]) % 4)
+                        decoded = base64.b64decode(payload).decode()
+                        uid_data = json.loads(decoded)
+                        uid = uid_data.get("sub", uid_data.get("user_id", "-"))
+                except Exception:
+                    pass
+            else:
+                _safe_print(f"{prefix}  {fail('[ERR]')} Akun gagal dibuat")
+                return False
+
+            # 9) Connect to 9router
+            router_status = "-"
+            if args.router:
+                # Create session with cookies for 9router
+                router_session = std_requests.Session()
+                router_session.cookies.update(session_cookies)
+                ok_router = connect_to_router(
+                    session=router_session,
+                    router_base=args.router_base,
+                    router_token=args.router_token,
+                    proxy=args.proxy,
+                )
+                router_status = "connected" if ok_router else "failed"
+
     except Exception as e:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal mengirim kode: {fail(str(e))}")
+        _safe_print(f"{prefix}  {fail('[ERR]')} Browser error: {fail(str(e))}")
         return False
-    if send_resp.status_code >= 400:
-        try:
-            err = send_resp.json().get("error") or send_resp.text[:80]
-        except Exception:
-            err = send_resp.text[:80]
-        _safe_print(f"{prefix}  {fail('[ERR]')} Email ditolak: {fail(str(err))}")
-        return False
-    _safe_print(f"{prefix}  {step('[1/4]')} {ok('Kode verifikasi terkirim!')}")
-
-    # 2) OTP
-    code = mail.wait_for_code(max_retries=args.otp_retries, delay=args.otp_delay)
-    if not code:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Kode OTP tidak diterima")
-        return False
-    _safe_print(f"{prefix}  {step('[2/4]')} {ok('Kode OTP diterima:')} {bold(code)}")
-
-    # 3) verify email
-    try:
-        verify_resp = verify_email(session, email, code)
-    except Exception as e:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal verifikasi: {fail(str(e))}")
-        return False
-    if verify_resp.status_code >= 400:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Kode tidak valid")
-        return False
-    _safe_print(f"{prefix}  {step('[3/4]')} {ok('Email terverifikasi,')} {warn('melewati keamanan...')}")
-
-    # 4) turnstile
-    try:
-        token = solve_turnstile(
-            sitekey=args.sitekey,
-            page_url=TURNSTILE_PAGE_URL,
-            solver_base=args.solver,
-            max_wait=args.turnstile_wait,
-            proxy=args.proxy,
-        )
-        _safe_print(f"{prefix}  {step('[4/5]')} {ok('Turnstile solved:')} {dim(token[:30])}...")
-    except Exception as e:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Verifikasi keamanan gagal: {fail(str(e))}")
-        return False
-
-    # 5) create account
-    try:
-        create_resp = create_account(
-            session=session,
-            email=email,
-            password=args.password,
-            given_name=given_name,
-            family_name=family_name,
-            email_code=code,
-            turnstile_token=token,
-        )
-    except Exception as e:
-        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun (exception): {fail(str(e))}")
-        return False
-
-    if create_resp.status_code >= 400:
-        try:
-            err_json = create_resp.json()
-            err = err_json.get("error") or create_resp.text[:200]
-        except Exception:
-            err = create_resp.text[:200]
-        _safe_print(f"{prefix}  {fail('[ERR]')} Gagal membuat akun ({create_resp.status_code}): {fail(str(err))}")
-        return False
-
-    try:
-        uid = create_resp.json().get("session", {}).get("userId", "-")
-    except Exception:
-        uid = "-"
-    _safe_print(f"{prefix}  {step('[4/4]')} {ok('[OK]')} {ok('Akun berhasil dibuat!')}")
-
-    # 6) 9router
-    router_status = "-"
-    if args.router:
-        ok_router = connect_to_router(
-            session=session,
-            router_base=args.router_base,
-            router_token=args.router_token,
-            proxy=args.proxy,
-        )
-        router_status = "connected" if ok_router else "failed"
 
     # simpan ke accounts.txt
     ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -676,7 +772,7 @@ def register_one(args, worker_id: int = 0) -> bool:
     with _print_lock_fn():
         with open("accounts.txt", "a", encoding="utf-8") as f:
             f.write(line)
-    _safe_print(f"{prefix}  {ok('[OK]')} Tersimpan {step('➤')} {bold('accounts.txt')}")
+    _safe_print(f"{prefix}  {step('[5/5]')} {ok('Tersimpan')} {step('➤')} {bold('accounts.txt')}")
     return True
 
 
