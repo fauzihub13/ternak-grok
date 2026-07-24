@@ -31,7 +31,9 @@ DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD", "LauSapeEmpruy88@@")
 
 TURNSTILE_SITEKEY = "0x4AAAAAAAhr9JGVDZbrZOo0"
 TURNSTILE_PAGE_URL = f"{BASE}/login?mode=sign-up"
-TURNSTILE_SOLVER_BASE = ""  # empty = use camoufox by default; set to solver URL to use external
+TURNSTILE_SOLVER_BASE = os.getenv("TURNSTILE_SOLVER_BASE", "")  # local solver URL
+CAPSOLVER_API_KEY = os.getenv("CAPSOLVER_API_KEY", "")
+TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY", "")
 
 ROUTER_BASE = "http://localhost:20128"
 ROUTER_AUTH_TOKEN = os.getenv("ROUTER_AUTH_TOKEN", "")
@@ -270,98 +272,165 @@ def create_account(
     return session.post(CREATE_URL, headers=API_HEADERS, json=payload, timeout=45)
 
 
-def solve_turnstile_camoufox(
+def _valid_token(token: object) -> str | None:
+    if isinstance(token, str) and len(token) > 40 and " " not in token.strip():
+        return token.strip().strip('"')
+    return None
+
+
+def solve_turnstile_capsolver(
     sitekey: str = TURNSTILE_SITEKEY,
     page_url: str = TURNSTILE_PAGE_URL,
+    api_key: str = CAPSOLVER_API_KEY,
+    max_wait: int = 120,
     proxy: str | None = None,
-    timeout_ms: int = 60_000,
 ) -> str:
-    """Solve Turnstile using camoufox headless browser (no external API needed)."""
-    from camoufox.sync_api import Camoufox
+    """Pure HTTP: CapSolver AntiTurnstileTask."""
+    if not api_key:
+        raise RuntimeError("CAPSOLVER_API_KEY empty")
 
-    launch_kw: dict = {"headless": True}
+    task: dict = {
+        "type": "AntiTurnstileTaskProxyLess",
+        "websiteURL": page_url,
+        "websiteKey": sitekey,
+    }
+    if proxy:
+        # http://user:pass@host:port -> CapSolver proxy format
+        from urllib.parse import urlparse
+
+        p = urlparse(proxy)
+        task = {
+            "type": "AntiTurnstileTask",
+            "websiteURL": page_url,
+            "websiteKey": sitekey,
+            "proxyType": (p.scheme or "http").replace("socks5h", "socks5"),
+            "proxyAddress": p.hostname,
+            "proxyPort": p.port,
+        }
+        if p.username:
+            task["proxyLogin"] = p.username
+        if p.password:
+            task["proxyPassword"] = p.password
+
+    create = std_requests.post(
+        "https://api.capsolver.com/createTask",
+        json={"clientKey": api_key, "task": task},
+        timeout=30,
+    )
+    create.raise_for_status()
+    cdata = create.json()
+    if cdata.get("errorId"):
+        raise RuntimeError(f"capsolver create: {cdata.get('errorDescription') or cdata}")
+    task_id = cdata.get("taskId")
+    if not task_id:
+        raise RuntimeError(f"capsolver no taskId: {cdata}")
+
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        time.sleep(2)
+        poll = std_requests.post(
+            "https://api.capsolver.com/getTaskResult",
+            json={"clientKey": api_key, "taskId": task_id},
+            timeout=30,
+        )
+        poll.raise_for_status()
+        pdata = poll.json()
+        if pdata.get("errorId"):
+            raise RuntimeError(f"capsolver result: {pdata.get('errorDescription') or pdata}")
+        status = str(pdata.get("status", "")).lower()
+        if status == "ready":
+            sol = pdata.get("solution") or {}
+            token = _valid_token(sol.get("token") or sol.get("gRecaptchaResponse"))
+            if token:
+                return token
+            raise RuntimeError(f"capsolver empty token: {pdata}")
+        if status in {"failed", "error"}:
+            raise RuntimeError(f"capsolver failed: {pdata}")
+    raise RuntimeError("capsolver timeout")
+
+
+def solve_turnstile_2captcha(
+    sitekey: str = TURNSTILE_SITEKEY,
+    page_url: str = TURNSTILE_PAGE_URL,
+    api_key: str = TWOCAPTCHA_API_KEY,
+    max_wait: int = 120,
+    proxy: str | None = None,
+) -> str:
+    """Pure HTTP: 2Captcha turnstile."""
+    if not api_key:
+        raise RuntimeError("TWOCAPTCHA_API_KEY empty")
+
+    params = {
+        "key": api_key,
+        "method": "turnstile",
+        "sitekey": sitekey,
+        "pageurl": page_url,
+        "json": 1,
+    }
     if proxy:
         from urllib.parse import urlparse
+
         p = urlparse(proxy)
-        pcfg: dict = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
-        if p.username:
-            pcfg["username"] = p.username
-        if p.password:
-            pcfg["password"] = p.password
-        launch_kw["proxy"] = pcfg
-        launch_kw["geoip"] = True
+        params["proxy"] = (
+            f"{p.username}:{p.password}@{p.hostname}:{p.port}"
+            if p.username
+            else f"{p.hostname}:{p.port}"
+        )
+        params["proxytype"] = (p.scheme or "HTTP").upper().replace("SOCKS5H", "SOCKS5")
 
-    token = None
-    with Camoufox(**launch_kw) as browser:
-        page = browser.new_page()
-        page.goto(page_url, wait_until="networkidle", timeout=30_000)
+    create = std_requests.get("https://2captcha.com/in.php", params=params, timeout=30)
+    create.raise_for_status()
+    cdata = create.json()
+    if cdata.get("status") != 1:
+        raise RuntimeError(f"2captcha create: {cdata.get('request') or cdata}")
+    req_id = cdata["request"]
 
-        # Tunggu turnstile solve dan ambil token dari HTML
-        deadline = time.time() + (timeout_ms / 1000)
-        while time.time() < deadline:
-            try:
-                # Ambil full HTML content (tidak pakai eval)
-                html = page.content()
-                # Cari token di hidden input
-                match = re.search(
-                    r'name=["\']cf-turnstile-response["\'][^>]*value=["\']([^"\']+)["\']',
-                    html
-                )
-                if match and len(match.group(1)) > 40:
-                    token = match.group(1)
-                    break
-                # Cek juga di data attribute
-                match2 = re.search(
-                    r'cf-turnstile-response["\'][^>]*data-response=["\']([^"\']+)["\']',
-                    html
-                )
-                if match2 and len(match2.group(1)) > 40:
-                    token = match2.group(1)
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
-
-    if not token or len(token) < 40:
-        raise RuntimeError(f"camoufox turnstile bad token: {token!r}")
-    return token
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        time.sleep(5)
+        poll = std_requests.get(
+            "https://2captcha.com/res.php",
+            params={"key": api_key, "action": "get", "id": req_id, "json": 1},
+            timeout=30,
+        )
+        poll.raise_for_status()
+        pdata = poll.json()
+        if pdata.get("status") == 1:
+            token = _valid_token(pdata.get("request"))
+            if token:
+                return token
+            raise RuntimeError(f"2captcha empty token: {pdata}")
+        if pdata.get("request") != "CAPCHA_NOT_READY":
+            raise RuntimeError(f"2captcha result: {pdata.get('request') or pdata}")
+    raise RuntimeError("2captcha timeout")
 
 
-def solve_turnstile(
+def solve_turnstile_local(
     sitekey: str = TURNSTILE_SITEKEY,
     page_url: str = TURNSTILE_PAGE_URL,
     solver_base: str = TURNSTILE_SOLVER_BASE,
     max_wait: int = 180,
     poll_every: float = 2.0,
-    proxy: str | None = None,
 ) -> str:
-    """Try external solver first; fall back to camoufox if it fails/times out."""
-    # â”€â”€ camoufox direct (no external solver) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    """Pure HTTP: local turnstile solver service."""
     if not solver_base:
-        return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
+        raise RuntimeError("TURNSTILE_SOLVER_BASE empty")
 
-    # â”€â”€ external solver â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     create_url = (
         f"{solver_base.rstrip('/')}/turnstile"
         f"?url={quote(page_url, safe='')}"
         f"&sitekey={quote(sitekey, safe='')}"
     )
-    try:
-        create_resp = std_requests.get(create_url, timeout=15)
-        create_resp.raise_for_status()
-        create_data = create_resp.json()
-    except Exception:
-        return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
-
+    create_resp = std_requests.get(create_url, timeout=15)
+    create_resp.raise_for_status()
+    create_data = create_resp.json()
     task_id = create_data.get("task_id") or create_data.get("id")
     if not task_id:
-        return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
+        raise RuntimeError(f"local solver no task_id: {create_data}")
 
     result_url = f"{solver_base.rstrip('/')}/result?id={quote(str(task_id), safe='')}"
     deadline = time.time() + max_wait
-    attempt = 0
     while time.time() < deadline:
-        attempt += 1
         try:
             resp = std_requests.get(result_url, timeout=15)
         except Exception:
@@ -397,15 +466,297 @@ def solve_turnstile(
         elif text and "status" not in text.lower() and len(text) > 40 and " " not in text:
             token = text.strip('"')
 
-        if token and isinstance(token, str) and len(token) > 40:
-            return token
-
+        ok = _valid_token(token)
+        if ok:
+            return ok
         if status in {"failed", "error", "fail"}:
-            return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
-
+            raise RuntimeError(f"local solver failed: {data or text[:200]}")
         time.sleep(poll_every)
+    raise RuntimeError("local solver timeout")
 
-    return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
+
+def solve_turnstile_camoufox(
+    sitekey: str = TURNSTILE_SITEKEY,
+    page_url: str = TURNSTILE_PAGE_URL,
+    proxy: str | None = None,
+    timeout_ms: int = 120_000,
+) -> str:
+    """Gratis, no API key. No page.evaluate (CSP). init_script + console + CDP input + click widget."""
+    from camoufox.sync_api import Camoufox
+
+    # virtual = better vs CF headless detect; TURNSTILE_HEADED=1 for debug window
+    headed = os.getenv("TURNSTILE_HEADED", "").strip().lower() in {"1", "true", "yes", "y"}
+    headless_mode: bool | str = False if headed else "virtual"
+
+    launch_kw: dict = {"headless": headless_mode, "humanize": True}
+    if proxy:
+        from urllib.parse import urlparse
+
+        p = urlparse(proxy)
+        pcfg: dict = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+        if p.username:
+            pcfg["username"] = p.username
+        if p.password:
+            pcfg["password"] = p.password
+        launch_kw["proxy"] = pcfg
+        launch_kw["geoip"] = True
+
+    held: dict = {"token": None}
+
+    def take(tok: object) -> None:
+        ok = _valid_token(tok)
+        if ok:
+            held["token"] = ok
+
+    def on_console(msg) -> None:
+        try:
+            text = msg.text
+        except Exception:
+            return
+        if "TURNSTILE_TOKEN:" in text:
+            take(text.split("TURNSTILE_TOKEN:", 1)[1].strip())
+
+    def on_response(resp) -> None:
+        try:
+            url = resp.url.lower()
+            if "challenges.cloudflare.com" not in url and "turnstile" not in url:
+                return
+            ctype = (resp.headers or {}).get("content-type", "")
+            if "json" not in ctype and "text" not in ctype:
+                return
+            body = resp.text()
+            if not body or len(body) < 40:
+                return
+            # token-like string in CF responses
+            m = re.search(r"\b(0\.[a-zA-Z0-9_\-\.]{80,})\b", body)
+            if m:
+                take(m.group(1))
+            m2 = re.search(r'"token"\s*:\s*"([^"]{40,})"', body)
+            if m2:
+                take(m2.group(1))
+        except Exception:
+            pass
+
+    # runs before page scripts; CSP does not block init_script
+    hook_js = f"""
+    (() => {{
+      const SK = {json.dumps(sitekey)};
+      window.__ts_token = null;
+      const emit = (t) => {{
+        if (typeof t === 'string' && t.length > 40) {{
+          window.__ts_token = t;
+          console.log('TURNSTILE_TOKEN:' + t);
+        }}
+      }};
+      window.addEventListener('message', (ev) => {{
+        try {{
+          let d = ev.data;
+          if (typeof d === 'string') {{
+            if (d.length > 40 && d.indexOf('.') > 0) emit(d);
+            try {{ d = JSON.parse(d); }} catch (e) {{ return; }}
+          }}
+          if (!d || typeof d !== 'object') return;
+          const t = d.token || d.response || d['cf-turnstile-response']
+            || (d.data && (d.data.token || d.data.response));
+          emit(t);
+        }} catch (e) {{}}
+      }});
+      const patch = () => {{
+        if (!window.turnstile || window.turnstile.__ts_patched) return false;
+        window.turnstile.__ts_patched = true;
+        const origRender = window.turnstile.render.bind(window.turnstile);
+        window.turnstile.render = (el, opts) => {{
+          opts = Object.assign({{}}, opts || {{}});
+          const prev = opts.callback;
+          opts.callback = (t) => {{ emit(t); if (typeof prev === 'function') prev(t); }};
+          if (!opts.sitekey) opts.sitekey = SK;
+          return origRender(el, opts);
+        }};
+        if (typeof window.turnstile.ready === 'function') {{
+          window.turnstile.ready(() => {{
+            try {{
+              if (document.querySelector('[name="cf-turnstile-response"]')) return;
+              const div = document.createElement('div');
+              div.id = 'ts-auto-widget';
+              document.documentElement.appendChild(div);
+              window.turnstile.render(div, {{
+                sitekey: SK,
+                callback: emit,
+                'error-callback': () => {{}},
+                'expired-callback': () => {{}},
+              }});
+            }} catch (e) {{}}
+          }});
+        }}
+        return true;
+      }};
+      const iv = setInterval(() => {{ if (patch()) clearInterval(iv); }}, 30);
+      setTimeout(() => clearInterval(iv), 90000);
+      const scan = () => {{
+        const inp = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+        if (inp && inp.value) emit(inp.value);
+      }};
+      setInterval(scan, 500);
+      const mo = new MutationObserver(scan);
+      const boot = () => {{
+        if (document.documentElement) mo.observe(document.documentElement, {{ childList: true, subtree: true, attributes: true, characterData: true }});
+        scan();
+      }};
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+      else boot();
+    }})();
+    """
+
+    def read_inputs(page) -> str | None:
+        sels = (
+            'input[name="cf-turnstile-response"]',
+            'textarea[name="cf-turnstile-response"]',
+            "input[name='cf-turnstile-response']",
+        )
+        targets = [page] + list(page.frames)
+        for ctx in targets:
+            for sel in sels:
+                try:
+                    loc = ctx.locator(sel)
+                    n = loc.count()
+                    for i in range(n):
+                        el = loc.nth(i)
+                        try:
+                            val = el.input_value(timeout=200)
+                        except Exception:
+                            try:
+                                val = el.get_attribute("value")
+                            except Exception:
+                                val = None
+                        ok = _valid_token(val)
+                        if ok:
+                            return ok
+                except Exception:
+                    continue
+        return None
+
+    def try_click_widget(page) -> None:
+        # checkbox mode: click turnstile iframe
+        try:
+            for frame in page.frames:
+                fu = (frame.url or "").lower()
+                if "challenges.cloudflare.com" not in fu and "turnstile" not in fu:
+                    continue
+                for sel in ("input[type=checkbox]", "body", "#content", ".ctp-checkbox-label"):
+                    try:
+                        loc = frame.locator(sel)
+                        if loc.count() > 0:
+                            loc.first.click(timeout=800, force=True)
+                            return
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
+            page.locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first.click(
+                timeout=800, force=True
+            )
+        except Exception:
+            pass
+
+    with Camoufox(**launch_kw) as browser:
+        page = browser.new_page()
+        page.on("console", on_console)
+        page.on("response", on_response)
+        page.add_init_script(hook_js)
+        page.goto(page_url, wait_until="domcontentloaded", timeout=60_000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=20_000)
+        except Exception:
+            pass
+
+        deadline = time.time() + (timeout_ms / 1000)
+        clicked = False
+        while time.time() < deadline:
+            if held["token"]:
+                return held["token"]
+
+            got = read_inputs(page)
+            if got:
+                return got
+
+            if not clicked or int(time.time()) % 8 == 0:
+                try_click_widget(page)
+                clicked = True
+
+            # static HTML scrape
+            try:
+                html = page.content()
+                for pat in (
+                    r'name=["\']cf-turnstile-response["\'][^>]*value=["\']([^"\']{40,})["\']',
+                    r'value=["\']([^"\']{40,})["\'][^>]*name=["\']cf-turnstile-response["\']',
+                    r"\b(0\.[a-zA-Z0-9_\-\.]{80,})\b",
+                ):
+                    m = re.search(pat, html)
+                    if m:
+                        ok = _valid_token(m.group(1))
+                        if ok:
+                            return ok
+            except Exception:
+                pass
+
+            time.sleep(0.6)
+
+    raise RuntimeError(f"camoufox turnstile bad token: {held['token']!r}")
+
+
+def solve_turnstile(
+    sitekey: str = TURNSTILE_SITEKEY,
+    page_url: str = TURNSTILE_PAGE_URL,
+    solver_base: str = TURNSTILE_SOLVER_BASE,
+    max_wait: int = 180,
+    poll_every: float = 2.0,
+    proxy: str | None = None,
+) -> str:
+    """Priority: CapSolver API → 2Captcha API → local solver URL → camoufox browser."""
+    errors: list[str] = []
+
+    # 1) CapSolver pure API
+    key = CAPSOLVER_API_KEY
+    if key:
+        try:
+            return solve_turnstile_capsolver(
+                sitekey=sitekey, page_url=page_url, api_key=key, max_wait=max_wait, proxy=proxy
+            )
+        except Exception as e:
+            errors.append(f"capsolver: {e}")
+
+    # 2) 2Captcha pure API
+    key2 = TWOCAPTCHA_API_KEY
+    if key2:
+        try:
+            return solve_turnstile_2captcha(
+                sitekey=sitekey, page_url=page_url, api_key=key2, max_wait=max_wait, proxy=proxy
+            )
+        except Exception as e:
+            errors.append(f"2captcha: {e}")
+
+    # 3) local HTTP solver
+    base = solver_base or TURNSTILE_SOLVER_BASE
+    if base:
+        try:
+            return solve_turnstile_local(
+                sitekey=sitekey,
+                page_url=page_url,
+                solver_base=base,
+                max_wait=max_wait,
+                poll_every=poll_every,
+            )
+        except Exception as e:
+            errors.append(f"local: {e}")
+
+    # 4) browser fallback
+    try:
+        return solve_turnstile_camoufox(sitekey=sitekey, page_url=page_url, proxy=proxy)
+    except Exception as e:
+        errors.append(f"camoufox: {e}")
+
+    raise RuntimeError("turnstile solve failed | " + " | ".join(errors))
 
 
 def print_resp(label: str, resp: cffi_requests.Response, verbose: bool = False) -> None:

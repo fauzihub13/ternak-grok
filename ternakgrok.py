@@ -545,8 +545,12 @@ def connect_to_router(
     router_base: str = ROUTER_BASE,
     router_token: str = ROUTER_AUTH_TOKEN,
 ) -> bool:
-    """Authorize new xAI account to 9router via browser."""
+    """Authorize new xAI account to 9router."""
     _safe_print(f"  {info('[+]')} Menghubungkan ke {bold('9router')}...")
+
+    # Get cookies from browser for API calls
+    cookies = page.context.cookies()
+    cookie_dict = {c['name']: c['value'] for c in cookies if 'x.ai' in c.get('domain', '')}
 
     # Step 1: Get device code from 9router
     try:
@@ -560,7 +564,6 @@ def connect_to_router(
             _safe_print(f"  {fail('[ERR]')} 9router tidak merespons (kode {resp.status_code})")
             return False
         data = resp.json()
-        _safe_print(f"  {dim('[debug]')} Device code: {str(data)[:200]}")
     except Exception as e:
         _safe_print(f"  {fail('[ERR]')} 9router tidak dapat dijangkau: {e}")
         return False
@@ -570,46 +573,36 @@ def connect_to_router(
     user_code = data.get("user_code") or data.get("userCode")
     verify_url = data.get("verification_uri_complete") or data.get("verificationUriComplete")
 
-    _safe_print(f"  {dim('[debug]')} verify_url: {verify_url}")
-    _safe_print(f"  {dim('[debug]')} user_code: {user_code}")
-
     if not verify_url:
         _safe_print(f"  {fail('[ERR]')} URL verifikasi tidak ditemukan")
         return False
 
-    # Step 2: Navigate to verification URL in browser
+    # Step 2: Verify and approve using browser
     try:
-        _safe_print(f"  {dim('[debug]')} Navigating to verify URL...")
+        # Navigate to verify URL
         page.goto(verify_url, wait_until="networkidle", timeout=15_000)
-        time.sleep(2)
+        time.sleep(3)
 
-        _safe_print(f"  {dim('[debug]')} Page URL: {page.url}")
-
-        # Dismiss cookie banner if exists
+        # Dismiss cookie banner
         try:
             page.locator('#onetrust-accept-btn-handler').click(timeout=2_000)
             time.sleep(0.5)
         except Exception:
             pass
 
-        # Click "Continue" button
+        # Click Continue
         continue_btn = page.locator('button:has-text("Continue"), button:has-text("Allow")')
-        _safe_print(f"  {dim('[debug]')} Continue buttons: {continue_btn.count()}")
         if continue_btn.count() > 0:
-            btn_text = continue_btn.first.inner_text()
-            _safe_print(f"  {dim('[debug]')} Clicking: {btn_text}")
             continue_btn.first.click()
             time.sleep(3)
 
-        # Click "Allow" button if appears
+        # Click Allow
         allow_btn = page.locator('button:has-text("Allow"), button:has-text("Authorize")')
-        _safe_print(f"  {dim('[debug]')} Allow buttons: {allow_btn.count()}")
         if allow_btn.count() > 0:
-            btn_text = allow_btn.first.inner_text()
-            _safe_print(f"  {dim('[debug]')} Clicking: {btn_text}")
             allow_btn.first.click()
             time.sleep(3)
 
+        # Check final URL
         _safe_print(f"  {dim('[debug]')} Final URL: {page.url}")
     except Exception as e:
         _safe_print(f"  {fail('[ERR]')} Gagal verifikasi browser: {e}")
@@ -617,7 +610,6 @@ def connect_to_router(
 
     # Step 3: Poll 9router
     try:
-        _safe_print(f"  {dim('[debug]')} Polling 9router...")
         poll_resp = std_requests.post(
             f"{router_base}/api/oauth/grok-cli/poll",
             json={"deviceCode": device_code, "codeVerifier": code_verifier, "extraData": None},
@@ -625,7 +617,6 @@ def connect_to_router(
             headers={"Accept": "*/*", "Content-Type": "application/json"},
             timeout=15,
         )
-        _safe_print(f"  {dim('[debug]')} Poll response: {poll_resp.status_code} {poll_resp.text[:200]}")
         if poll_resp.status_code == 200:
             try:
                 poll_data = poll_resp.json()
@@ -814,6 +805,8 @@ def register_one(args, worker_id: int = 0) -> bool:
             # 9) Connect to 9router
             router_status = "-"
             if args.router:
+                _safe_print(f"{prefix}  {dim('[debug]')} Tunggu 5 detik sebelum connect ke 9router...")
+                time.sleep(5)
                 ok_router = connect_to_router(
                     page=page,
                     router_base=args.router_base,
