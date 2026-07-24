@@ -336,77 +336,33 @@ def solve_turnstile_camoufox(
     token = None
     with Camoufox(**launch_kw) as browser:
         page = browser.new_page()
-
-        # Inject script capture turnstile token SEBELUM page load
-        page.add_init_script("""
-            window.__turnstile_token = null;
-            const origRender = window.turnstile?.render;
-            // Override callback untuk capture token
-            window.__captureTurnstile = function(token) {
-                window.__turnstile_token = token;
-            };
-        """)
-
         page.goto(page_url, wait_until="networkidle", timeout=30_000)
 
-        # Tunggu turnstile widget muncul dan solve
-        # Camoufox biasanya auto-solve, tunggu saja
+        # Tunggu turnstile solve dan ambil token dari HTML
         deadline = time.time() + (timeout_ms / 1000)
-        check_count = 0
         while time.time() < deadline:
-            check_count += 1
             try:
-                # Cek apakah turnstile sudah solved dengan cek token di page
-                result = page.evaluate("""
-                    () => {
-                        // Cek di response/input hidden
-                        const input = document.querySelector('input[name="cf-turnstile-response"]');
-                        if (input && input.value) return input.value;
-                        // Cek di turnstile widget
-                        const widget = document.querySelector('.cf-turnstile');
-                        if (widget) {
-                            const resp = widget.querySelector('[name="cf-turnstile-response"]');
-                            if (resp && resp.value) return resp.value;
-                        }
-                        // Cek global token
-                        if (window.__turnstile_token) return window.__turnstile_token;
-                        return null;
-                    }
-                """)
-                if result and len(result) > 40:
-                    token = result
+                # Ambil full HTML content (tidak pakai eval)
+                html = page.content()
+                # Cari token di hidden input
+                match = re.search(
+                    r'name=["\']cf-turnstile-response["\'][^>]*value=["\']([^"\']+)["\']',
+                    html
+                )
+                if match and len(match.group(1)) > 40:
+                    token = match.group(1)
+                    break
+                # Cek juga di data attribute
+                match2 = re.search(
+                    r'cf-turnstile-response["\'][^>]*data-response=["\']([^"\']+)["\']',
+                    html
+                )
+                if match2 and len(match2.group(1)) > 40:
+                    token = match2.group(1)
                     break
             except Exception:
                 pass
-
-            # Coba klik turnstile checkbox jika ada
-            if check_count == 3:
-                try:
-                    # Cari iframe turnstile
-                    frames = page.frames
-                    for frame in frames:
-                        if "challenges.cloudflare.com" in frame.url:
-                            # Klik body frame untuk trigger
-                            frame.click("body", timeout=3000)
-                            break
-                except Exception:
-                    pass
-
             time.sleep(1)
-
-        # Fallback: cek lagi setelah tunggu
-        if not token:
-            try:
-                result = page.evaluate("""
-                    () => {
-                        const input = document.querySelector('input[name="cf-turnstile-response"]');
-                        return input ? input.value : null;
-                    }
-                """)
-                if result and len(result) > 40:
-                    token = result
-            except Exception:
-                pass
 
     if not token or len(token) < 40:
         raise RuntimeError(f"camoufox turnstile bad token: {token!r}")
