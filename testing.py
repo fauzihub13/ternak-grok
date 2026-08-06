@@ -544,15 +544,15 @@ def connect_to_router(
     page,
     router_base: str = ROUTER_BASE,
     router_token: str = ROUTER_AUTH_TOKEN,
+    poll_retries: int = 5,
 ) -> bool:
-    """Authorize new xAI account to 9router."""
+    """Authorize new xAI account to 9router via curl_cffi + browser cookies."""
     _safe_print(f"  {info('[+]')} Menghubungkan ke {bold('9router')}...")
 
-    # Get cookies from browser for API calls
-    cookies = page.context.cookies()
-    cookie_dict = {c['name']: c['value'] for c in cookies if 'x.ai' in c.get('domain', '')}
+    # Ambil SEMUA cookie browser (jangan filter ketat — sso kadang domain beda)
+    cookie_dict = {c["name"]: c["value"] for c in page.context.cookies()}
 
-    # Step 1: Get device code from 9router
+    # Step 1: device code dari 9router
     try:
         resp = std_requests.get(
             f"{router_base}/api/oauth/grok-cli/device-code",
@@ -561,89 +561,101 @@ def connect_to_router(
             timeout=15,
         )
         if resp.status_code != 200:
-            _safe_print(f"  {fail('[ERR]')} 9router tidak merespons (kode {resp.status_code})")
+            _safe_print(f"  {fail('[ERR]')} 9router HTTP {resp.status_code}")
             return False
         data = resp.json()
     except Exception as e:
-        _safe_print(f"  {fail('[ERR]')} 9router tidak dapat dijangkau: {e}")
+        _safe_print(f"  {fail('[ERR]')} 9router unreachable: {e}")
         return False
 
     device_code = data.get("device_code") or data.get("deviceCode")
     code_verifier = data.get("codeVerifier") or data.get("code_verifier")
     user_code = data.get("user_code") or data.get("userCode")
-    verify_url = data.get("verification_uri_complete") or data.get("verificationUriComplete")
-
-    if not verify_url:
-        _safe_print(f"  {fail('[ERR]')} URL verifikasi tidak ditemukan")
+    if not device_code or not user_code:
+        _safe_print(f"  {fail('[ERR]')} device_code/user_code missing")
         return False
 
-    # Step 2: Verify and approve using curl_cucci (like base.py)
+    # Step 2: verify + approve pakai curl_cffi (sama flow ternakgrok.py)
     auth_headers = {
         "content-type": "application/x-www-form-urlencoded",
         "origin": "https://accounts.x.ai",
         "referer": f"https://accounts.x.ai/oauth2/device?user_code={user_code}",
     }
-
-    # Create session with browser cookies
     session = make_session("chrome136", None)
     session.cookies.update(cookie_dict)
 
-    # Verify (Continue)
     try:
-        r1 = session.post(
+        session.post(
             "https://auth.x.ai/oauth2/device/verify",
             data=f"user_code={user_code}",
             headers=auth_headers,
             timeout=20,
             allow_redirects=True,
         )
-        _safe_print(f"  {dim('[debug]')} Verify: {r1.status_code}")
     except Exception as e:
-        _safe_print(f"  {fail('[ERR]')} Gagal verifikasi: {e}")
+        _safe_print(f"  {fail('[ERR]')} verify: {e}")
         return False
 
-    # Approve (Allow)
     auth_headers["referer"] = f"https://accounts.x.ai/oauth2/device/consent?user_code={user_code}"
     try:
-        r2 = session.post(
+        session.post(
             "https://auth.x.ai/oauth2/device/approve",
             data=f"user_code={user_code}&action=allow&principal_type=User&principal_id=",
             headers=auth_headers,
             timeout=20,
             allow_redirects=True,
         )
-        _safe_print(f"  {dim('[debug]')} Approve: {r2.status_code}")
     except Exception as e:
-        _safe_print(f"  {fail('[ERR]')} Gagal approve: {e}")
+        _safe_print(f"  {fail('[ERR]')} approve: {e}")
         return False
 
-    # Step 3: Poll 9router
-    try:
-        poll_resp = std_requests.post(
-            f"{router_base}/api/oauth/grok-cli/poll",
-            json={"deviceCode": device_code, "codeVerifier": code_verifier, "extraData": None},
-            cookies={"auth_token": router_token},
-            headers={"Accept": "*/*", "Content-Type": "application/json"},
-            timeout=15,
-        )
-        if poll_resp.status_code == 200:
+    # Step 3: poll dengan retry (grok-cli kadang access denied)
+    for attempt in range(1, poll_retries + 1):
+        try:
+            poll_resp = std_requests.post(
+                f"{router_base}/api/oauth/grok-cli/poll",
+                json={
+                    "deviceCode": device_code,
+                    "codeVerifier": code_verifier,
+                    "extraData": None,
+                },
+                cookies={"auth_token": router_token},
+                headers={"Accept": "*/*", "Content-Type": "application/json"},
+                timeout=15,
+            )
+            if poll_resp.status_code != 200:
+                if attempt < poll_retries:
+                    time.sleep(2)
+                    continue
+                _safe_print(f"  {fail('[ERR]')} Poll HTTP {poll_resp.status_code}")
+                return False
             try:
                 poll_data = poll_resp.json()
-                if poll_data.get("success"):
-                    _safe_print(f"  {ok('[OK]')} Akun terhubung ke {bold('9router')}!")
-                    return True
-                else:
-                    _safe_print(f"  {fail('[ERR]')} 9router tolak: {poll_data.get('error', 'unknown')} - {poll_data.get('errorDescription', '')}")
-                    return False
             except Exception:
-                _safe_print(f"  {fail('[ERR]')} Response tidak valid: {poll_resp.text[:100]}")
-                return False
-        else:
-            _safe_print(f"  {fail('[ERR]')} Poll gagal: {dim(poll_resp.text[:200])}")
+                poll_data = {}
+            if poll_data.get("success") is True:
+                _safe_print(f"  {ok('[OK]')} Akun terhubung ke {bold('9router')}!")
+                return True
+            if poll_data.get("pending"):
+                time.sleep(2)
+                continue
+            err_msg = (
+                poll_data.get("errorDescription")
+                or poll_data.get("error")
+                or poll_resp.text[:120]
+            )
+            if attempt < poll_retries:
+                time.sleep(2)
+                continue
+            _safe_print(f"  {fail('[ERR]')} 9router: {err_msg}")
             return False
-    except Exception as e:
-        _safe_print(f"  {fail('[ERR]')} Poll error: {e}")
-        return False
+        except Exception as e:
+            if attempt < poll_retries:
+                time.sleep(2)
+                continue
+            _safe_print(f"  {fail('[ERR]')} Poll: {e}")
+            return False
+    return False
 
 
 import threading as _threading
@@ -761,61 +773,116 @@ def register_one(args, worker_id: int = 0) -> bool:
             # 7) Fill name
             fname_input = page.locator('input[name="firstName"], input[autocomplete="given-name"]')
             lname_input = page.locator('input[name="lastName"], input[autocomplete="family-name"]')
-            _safe_print(f"{prefix}  {dim('[debug]')} Name input count: {fname_input.count()}")
             if fname_input.count() > 0:
                 fname_input.fill(given_name)
                 lname_input.fill(family_name)
                 time.sleep(0.5)
                 page.click('button[type="submit"]', timeout=5_000)
-                time.sleep(5)
-                _safe_print(f"{prefix}  {dim('[debug]')} URL after name: {page.url}")
+                time.sleep(3)
 
-            # 8) Check success
-            _safe_print(f"{prefix}  {step('[4/5]')} {ok('Proses selesai,')} {warn('cek status...')}")
+            # 8) Tunggu session SSO — signup selesai, cookie sso sering baru muncul setelah redirect
+            _safe_print(f"{prefix}  {step('[4/5]')} {warn('tunggu session SSO...')}")
 
-            # Get cookies
-            cookies = page.context.cookies()
-            session_cookies = {c["name"]: c["value"] for c in cookies}
-            _safe_print(f"{prefix}  {dim('[debug]')} Cookies: {list(session_cookies.keys())}")
+            def _all_cookies() -> dict:
+                return {c["name"]: c["value"] for c in page.context.cookies()}
 
-            # Check for sso cookie (indicates success)
+            def _has_sso(cks: dict) -> bool:
+                return "sso" in cks or "sso-rw" in cks
+
+            session_cookies = _all_cookies()
+            # Poll + navigate console biar sso cookie ter-set
+            for attempt in range(1, 9):
+                session_cookies = _all_cookies()
+                if _has_sso(session_cookies):
+                    break
+                try:
+                    if attempt in (1, 3, 5):
+                        page.goto(
+                            "https://console.x.ai/home",
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                    elif attempt in (2, 4):
+                        page.goto(
+                            "https://accounts.x.ai/account",
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                    else:
+                        page.reload(wait_until="domcontentloaded", timeout=15_000)
+                except Exception:
+                    pass
+                time.sleep(2)
+                session_cookies = _all_cookies()
+                if _has_sso(session_cookies):
+                    break
+
             uid = "-"
-            if "sso" in session_cookies or "sso-rw" in session_cookies:
-                _safe_print(f"{prefix}  {ok('[OK]')} {ok('Akun berhasil dibuat!')}")
-                # Extract user ID from sso cookie
+            if not _has_sso(session_cookies):
+                # Signup form selesai tapi sso belum — tetap coba pakai cookies yg ada + last-logged-in
+                logged = session_cookies.get("last-logged-in-with", "")
+                if not logged and "cf_clearance" not in session_cookies:
+                    _safe_print(
+                        f"{prefix}  {fail('[ERR]')} Signup gagal "
+                        f"(cookies: {list(session_cookies.keys())})"
+                    )
+                    return False
+                # Force one more console hit
+                try:
+                    page.goto("https://console.x.ai", wait_until="networkidle", timeout=20_000)
+                    time.sleep(3)
+                    session_cookies = _all_cookies()
+                except Exception:
+                    pass
+
+            if _has_sso(session_cookies):
+                _safe_print(f"{prefix}  {ok('[OK]')} Akun berhasil dibuat!")
                 try:
                     sso_val = session_cookies.get("sso") or session_cookies.get("sso-rw")
                     if sso_val:
                         parts = sso_val.split(".")
                         if len(parts) >= 2:
                             payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-                            decoded = base64.b64decode(payload).decode()
-                            data = json.loads(decoded)
-                            uid = data.get("sub", data.get("user_id", data.get("session_id", "-")))
-                            _safe_print(f"{prefix}  {dim('[debug]')} SSO data: {data}")
-                except Exception as e:
-                    _safe_print(f"{prefix}  {dim('[debug]')} SSO decode error: {e}")
-
-                # Fallback: get uid from console page
-                if uid == "-":
-                    try:
-                        page.goto("https://console.x.ai", wait_until="networkidle", timeout=15_000)
-                        time.sleep(2)
-                        html = page.content()
-                        uid_match = re.search(r'"userId"[:\s]+"([^"]+)"', html)
-                        if uid_match:
-                            uid = uid_match.group(1)
-                    except Exception:
-                        pass
+                            data = json.loads(base64.b64decode(payload).decode())
+                            uid = (
+                                data.get("sub")
+                                or data.get("user_id")
+                                or data.get("session_id")
+                                or "-"
+                            )
+                except Exception:
+                    pass
             else:
-                _safe_print(f"{prefix}  {fail('[ERR]')} Akun gagal dibuat (cookies: {list(session_cookies.keys())})")
-                return False
+                # Form name/password/OTP lolos — anggap signup OK, lanjut poll 9router
+                # (sso kadang HttpOnly / domain lain, tapi session browser valid)
+                _safe_print(
+                    f"{prefix}  {warn('[!]')} sso cookie belum terlihat, "
+                    f"lanjut 9router (cookies: {list(session_cookies.keys())})"
+                )
+                try:
+                    page.goto("https://console.x.ai", wait_until="domcontentloaded", timeout=15_000)
+                    time.sleep(2)
+                    session_cookies = _all_cookies()
+                    if _has_sso(session_cookies):
+                        sso_val = session_cookies.get("sso") or session_cookies.get("sso-rw")
+                        if sso_val:
+                            parts = sso_val.split(".")
+                            if len(parts) >= 2:
+                                payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+                                data = json.loads(base64.b64decode(payload).decode())
+                                uid = (
+                                    data.get("sub")
+                                    or data.get("user_id")
+                                    or data.get("session_id")
+                                    or "-"
+                                )
+                except Exception:
+                    pass
 
-            # 9) Connect to 9router
+            # 9) Connect to 9router (browser session + curl_cffi poll)
             router_status = "-"
             if args.router:
-                _safe_print(f"{prefix}  {dim('[debug]')} Tunggu 5 detik sebelum connect ke 9router...")
-                time.sleep(5)
+                time.sleep(2)
                 ok_router = connect_to_router(
                     page=page,
                     router_base=args.router_base,

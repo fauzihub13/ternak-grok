@@ -213,11 +213,8 @@ def make_session(proxy: str | None = None) -> cffi_requests.Session:
 
 
 def cookies_to_dict(page_cookies: list) -> dict:
-    return {
-        c["name"]: c["value"]
-        for c in page_cookies
-        if "x.ai" in c.get("domain", "")
-    }
+    # Ambil semua cookie — jangan filter domain ketat (sso kadang domain beda)
+    return {c["name"]: c["value"] for c in page_cookies}
 
 
 def extract_uid(cookies: dict) -> str:
@@ -441,13 +438,45 @@ def register_one(
                 page.click('button[type="submit"]', timeout=5_000)
                 time.sleep(3)
 
-            cookies = cookies_to_dict(page.context.cookies())
+            # 6) tunggu SSO — cookie sso sering baru set setelah redirect console
+            def _all() -> dict:
+                return {c["name"]: c["value"] for c in page.context.cookies()}
+
+            cookies = _all()
+            for i in range(1, 9):
+                if "sso" in cookies or "sso-rw" in cookies:
+                    break
+                try:
+                    if i in (1, 3, 5):
+                        page.goto(
+                            "https://console.x.ai/home",
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                    elif i in (2, 4):
+                        page.goto(
+                            "https://accounts.x.ai/account",
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                    else:
+                        page.reload(wait_until="domcontentloaded", timeout=15_000)
+                except Exception:
+                    pass
+                time.sleep(2)
+                cookies = _all()
+
+            # Signup form lolos = akun OK; sso optional (kadang delay / HttpOnly domain)
             if "sso" not in cookies and "sso-rw" not in cookies:
-                _print(f"{prefix}  {err('[ERR]')} no sso cookie")
-                return False
+                if "cf_clearance" not in cookies and not cookies:
+                    _print(f"{prefix}  {err('[ERR]')} no session cookies")
+                    return False
+                _print(f"{prefix}  {warn('[!]')} sso belum terlihat, lanjut 9router")
+            else:
+                _print(f"{prefix}  {ok('[OK]')} akun OK")
 
             uid = extract_uid(cookies)
-            _print(f"{prefix}  {step('[4/5]')} {ok('akun OK')} uid={dim(str(uid)[:36])}")
+            _print(f"{prefix}  {step('[4/5]')} uid={dim(str(uid)[:36])}")
 
     except Exception as e:
         _print(f"{prefix}  {err('[ERR]')} browser: {e}")
