@@ -171,6 +171,29 @@ def extract_uid(cookies: dict) -> str:
             continue
     return "-"
 
+
+JSON_FILE = "accounts_cookies.json"
+_json_lock = _threading.Lock()
+
+
+def save_account_json(account: dict) -> None:
+    """Append 1 account object ke array JSON. Baca existing, tambah, tulis ulang. Thread-safe."""
+    with _json_lock:
+        existing: list = []
+        if os.path.exists(JSON_FILE) and os.path.getsize(JSON_FILE) > 0:
+            try:
+                with open(JSON_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    existing = data
+                elif isinstance(data, dict):
+                    existing = [data]
+            except Exception:
+                existing = []
+        existing.append(account)
+        with open(JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+
 # Signup - simplified no router
 def register_one(password: str, proxy: str | None = None, worker_id: int = 0) -> tuple[bool, dict]:
     prefix = f"{dim(f'[#{worker_id}]')}" if worker_id else ""
@@ -272,21 +295,32 @@ def register_one(password: str, proxy: str | None = None, worker_id: int = 0) ->
                 time.sleep(2)
                 cookies = _all()
 
-            if cookies:
-                _print(f"{prefix}  {ok('[OK]')} cookies collected (full SSO included)")
-            else:
+            if not cookies:
                 _print(f"{prefix}  {warn('[!]')} no cookies")
                 return False, {}
 
             uid = extract_uid(cookies)
+            _print(f"{prefix}  {ok('[OK]')} cookies collected (full SSO included)")
             _print(f"{prefix}  {step('[4/5]')} uid={dim(str(uid)[:36])}")
+
+            ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            account = {
+                "email": email,
+                "password": password,
+                "name": f"{given} {family}",
+                "uid": uid,
+                "cookies": cookies,
+                "timestamp": ts,
+            }
+            save_account_json(account)
+            _print(f"{prefix}  {step('[5/5]')} {ok('saved')} → {JSON_FILE}")
+            return True, account
 
     except Exception as e:
         _print(f"{prefix}  {err('[ERR]')} browser: {e}")
         return False, {}
 
-    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return True, {"email": email, "cookies": cookies, "uid": uid, "timestamp": ts}
+    return False, {}
 
 # Main - save to JSON
 def main() -> int:
@@ -314,21 +348,16 @@ def main() -> int:
 
     results = {"ok": 0, "fail": 0}
     lock = _threading.Lock()
-    accounts_list: list = []
     t0 = _dt.datetime.now()
 
     def worker(wid: int):
-        ok_r, account_data = register_one(
+        ok_r, _ = register_one(
             password=password,
             proxy=proxy,
             worker_id=wid,
         )
         with lock:
-            if ok_r:
-                accounts_list.append(account_data)
-                results["ok"] += 1
-            else:
-                results["fail"] += 1
+            results["ok" if ok_r else "fail"] += 1
 
     pending = list(range(1, count + 1))
     while pending:
@@ -348,13 +377,7 @@ def main() -> int:
         _print(f" {err('[ERR]')} Gagal    : {err(str(results['fail']))}")
     _print(f" {info('[i]')} Waktu    : {bold(f'{m}m {s}s')}")
 
-    # Save to JSON - full cookies
-    if accounts_list:
-        with open("accounts_cookies.json", "w", encoding="utf-8") as f:
-            json.dump(accounts_list, f, ensure_ascii=False, indent=2)
-        _print(f" {step('➤')} saved {len(accounts_list)} akun → accounts_cookies.json (full cookies incl. SSO)")
-    else:
-        _print(f" {err('[ERR]')} no accounts saved")
+    # Save already done in worker with append mode
     return 0 if results["fail"] == 0 else 1
 
 if __name__ == "__main__":
