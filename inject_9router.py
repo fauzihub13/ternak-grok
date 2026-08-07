@@ -92,13 +92,34 @@ def save_accounts(accounts: list) -> None:
             json.dump(accounts, f, ensure_ascii=False, indent=2)
 
 
-def update_account_status(idx: int, status: str) -> None:
+def remove_account(email: str | None = None, uid: str | None = None) -> bool:
+    """Hapus akun sukses inject dari JSON (match email atau uid)."""
     with _json_lock:
         accounts = load_accounts()
-        if 0 <= idx < len(accounts):
-            accounts[idx]["router"] = status
-            with open(JSON_FILE, "w", encoding="utf-8") as f:
-                json.dump(accounts, f, ensure_ascii=False, indent=2)
+        before = len(accounts)
+        accounts = [
+            a for a in accounts
+            if not (
+                (email and a.get("email") == email)
+                or (uid and uid != "-" and a.get("uid") == uid)
+            )
+        ]
+        if len(accounts) == before:
+            return False
+        with open(JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(accounts, f, ensure_ascii=False, indent=2)
+        return True
+
+
+def mark_account_failed(email: str, status: str = "failed") -> None:
+    with _json_lock:
+        accounts = load_accounts()
+        for a in accounts:
+            if a.get("email") == email:
+                a["router"] = status
+                break
+        with open(JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(accounts, f, ensure_ascii=False, indent=2)
 
 
 def connect_to_router(
@@ -203,7 +224,6 @@ def connect_to_router(
 
 
 def inject_one(
-    idx: int,
     account: dict,
     proxy: str | None,
     worker_id: int = 0,
@@ -216,7 +236,8 @@ def inject_one(
 
     if not cookies:
         _print(f"{prefix}  {err('[ERR]')} cookies kosong")
-        update_account_status(idx, "failed_no_cookies")
+        if email != "-":
+            mark_account_failed(email, "failed_no_cookies")
         return False
     if "sso" not in cookies and "sso-rw" not in cookies:
         _print(f"{prefix}  {warn('[!]')} no sso/sso-rw cookie")
@@ -230,10 +251,13 @@ def inject_one(
         poll_retries=5,
     )
     if ok_r:
-        update_account_status(idx, "connected")
+        removed = remove_account(email=email if email != "-" else None, uid=uid if uid != "-" else None)
         _print(f"{prefix}  {ok('[OK]')} 9router connected")
+        if removed:
+            _print(f"{prefix}  {step('➤')} dihapus dari {JSON_FILE}")
         return True
-    update_account_status(idx, "failed")
+    if email != "-":
+        mark_account_failed(email, "failed")
     _print(f"{prefix}  {err('[ERR]')} 9router failed")
     return False
 
@@ -248,22 +272,22 @@ def main() -> int:
         _print(f"{err('[ERR]')} {JSON_FILE} kosong / tidak ada")
         return 1
 
-    pending_idx = [
-        i for i, a in enumerate(accounts)
+    # snapshot email list — hapus by email, aman multi-thread (index geser)
+    pending_accounts = [
+        a for a in accounts
         if a.get("router") != "connected" and a.get("cookies")
     ]
     total = len(accounts)
-    already = total - len(pending_idx)
-    _print(f" {info('[i]')} total={bold(str(total))} · pending={bold(str(len(pending_idx)))} · connected={bold(str(already))}")
-    if not pending_idx:
-        _print(f" {ok('[OK]')} semua akun sudah connected")
+    _print(f" {info('[i]')} total={bold(str(total))} · pending inject={bold(str(len(pending_accounts)))}")
+    if not pending_accounts:
+        _print(f" {ok('[OK]')} tidak ada akun pending di {JSON_FILE}")
         return 0
 
     try:
-        raw = input(f"{info('?')} Berapa akun inject? [all={len(pending_idx)}] ").strip()
-        count = int(raw) if raw else len(pending_idx)
+        raw = input(f"{info('?')} Berapa akun inject? [all={len(pending_accounts)}] ").strip()
+        count = int(raw) if raw else len(pending_accounts)
     except (ValueError, EOFError):
-        count = len(pending_idx)
+        count = len(pending_accounts)
     try:
         threads = int(input(f"{info('?')} Thread? [1] ").strip() or "1")
     except (ValueError, EOFError):
@@ -275,9 +299,9 @@ def main() -> int:
     except EOFError:
         pass
 
-    count = max(1, min(count, len(pending_idx)))
+    count = max(1, min(count, len(pending_accounts)))
     threads = max(1, min(threads, count))
-    jobs = pending_idx[:count]
+    jobs = pending_accounts[:count]
 
     _print(f"\n {step('➤')} inject {bold(str(count))} akun · {bold(str(threads))} thread")
     _print(f" {dim(f'9router={ROUTER_BASE}')}")
@@ -287,16 +311,9 @@ def main() -> int:
     lock = _threading.Lock()
     t0 = time.time()
 
-    def worker(job_n: int, acc_idx: int):
-        # reload fresh account (status boleh berubah)
-        accs = load_accounts()
-        if acc_idx >= len(accs):
-            with lock:
-                results["fail"] += 1
-            return
+    def worker(job_n: int, account: dict):
         ok_r = inject_one(
-            idx=acc_idx,
-            account=accs[acc_idx],
+            account=account,
             proxy=proxy,
             worker_id=job_n,
         )
@@ -308,8 +325,8 @@ def main() -> int:
         batch = pending[:threads]
         pending = pending[threads:]
         ts = [
-            _threading.Thread(target=worker, args=(n, idx), daemon=True)
-            for n, idx in batch
+            _threading.Thread(target=worker, args=(n, acc), daemon=True)
+            for n, acc in batch
         ]
         for t in ts:
             t.start()
@@ -318,12 +335,13 @@ def main() -> int:
 
     elapsed = int(time.time() - t0)
     m, s = divmod(elapsed, 60)
+    left = len(load_accounts())
     _print(f"\n{dim('=' * 46)}")
-    _print(f" {ok('[OK]')} Berhasil : {ok(str(results['ok']))}")
+    _print(f" {ok('[OK]')} Berhasil : {ok(str(results['ok']))} (dihapus dari JSON)")
     if results["fail"]:
-        _print(f" {err('[ERR]')} Gagal    : {err(str(results['fail']))}")
+        _print(f" {err('[ERR]')} Gagal    : {err(str(results['fail']))} (tetap di JSON)")
     _print(f" {info('[i]')} Waktu    : {bold(f'{m}m {s}s')}")
-    _print(f" {step('➤')} status diupdate di {JSON_FILE}")
+    _print(f" {step('➤')} sisa di {JSON_FILE}: {bold(str(left))}")
     return 0 if results["fail"] == 0 else 1
 
 
