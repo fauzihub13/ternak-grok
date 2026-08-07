@@ -303,7 +303,7 @@ def register_one(password: str, proxy: str | None = None, worker_id: int = 0) ->
             _print(f"{prefix}  {ok('[OK]')} cookies collected (full SSO included)")
             _print(f"{prefix}  {step('[4/5]')} uid={dim(str(uid)[:36])}")
 
-            ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ts = _dt.datetime.now().strftime("%Y-%m-%d %H :%M:%S")
             account = {
                 "email": email,
                 "password": password,
