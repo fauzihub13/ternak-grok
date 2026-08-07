@@ -468,7 +468,7 @@ def register_one(
                 cookies = _all()
 
             keys = list(cookies.keys())
-            _print(f"{prefix}  {info('[i]')} cookie keys ({len(keys)}): {keys}")
+            # _print(f"{prefix}  {info('[i]')} cookie keys ({len(keys)}): {keys}")
 
             if "sso" not in cookies and "sso-rw" not in cookies:
                 _page_debug(page, prefix)
